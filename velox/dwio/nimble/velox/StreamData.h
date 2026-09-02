@@ -379,7 +379,7 @@ class NullableContentStreamData final : public NullsStreamData {
 
 struct StringBuffer {
   Vector<char>& buffer;
-  Vector<size_t>& lengths;
+  Vector<uint64_t>& lengths;
 };
 
 class NullableContentStringStreamData final : public NullsStreamData {

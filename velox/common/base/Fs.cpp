@@ -16,6 +16,8 @@
 
 #include "velox/common/base/Fs.h"
 
+#include <unistd.h>
+
 #include <fmt/format.h>
 #include <glog/logging.h>
 

@@ -3444,8 +3444,8 @@ class MergedFlatMapFieldReader final
       velox::vector_size_t* offsetsPtr) {
     velox::vector_size_t totalElements = 0;
     for (auto& nodeValue : nodeValues_) {
-      auto* sourceArray =
-          nodeValue->wrappedVector()->asUnchecked<velox::ArrayVector>();
+      auto* sourceArray = nodeValue->wrappedVector()
+                              ->template asUnchecked<velox::ArrayVector>();
       for (velox::vector_size_t i = 0; i < nodeValue->size(); ++i) {
         if (!nodeValue->isNullAt(i)) {
           totalElements += sourceArray->sizeAt(nodeValue->wrappedIndex(i));
@@ -3462,13 +3462,13 @@ class MergedFlatMapFieldReader final
     if (auto* nestedArray = elements->as<velox::ArrayVector>()) {
       velox::vector_size_t nestedTotal = 0;
       for (auto& nodeValue : nodeValues_) {
-        auto* sourceArray =
-            nodeValue->wrappedVector()->asUnchecked<velox::ArrayVector>();
+        auto* sourceArray = nodeValue->wrappedVector()
+                                ->template asUnchecked<velox::ArrayVector>();
         // This is only an upper-bound estimate for the common unencoded case;
         // encoded inner elements are skipped and simply fall back to the
         // incremental growth path.
         if (auto* sourceNested =
-                sourceArray->elements()->as<velox::ArrayVector>()) {
+                sourceArray->elements()->template as<velox::ArrayVector>()) {
           nestedTotal += sourceNested->elements()->size();
         }
       }
@@ -3485,8 +3485,9 @@ class MergedFlatMapFieldReader final
 
     velox::vector_size_t elementOffset = 0;
     for (size_t i = 0; i < nodes_.size(); ++i) {
-      auto* sourceArray =
-          nodeValues_[i]->wrappedVector()->asUnchecked<velox::ArrayVector>();
+      auto* sourceArray = nodeValues_[i]
+                              ->wrappedVector()
+                              ->template asUnchecked<velox::ArrayVector>();
       velox::vector_size_t sourceIndex = 0;
       copyRanges_.clear();
 

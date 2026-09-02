@@ -281,7 +281,8 @@ class NullsStreamChunker final : public StreamChunker {
     }
 
     const size_t remainingNonNulls = streamData_->rowCount() - nonNullsOffset_;
-    const size_t nonNullsInChunk = std::min(maxChunkSize_, remainingNonNulls);
+    const size_t nonNullsInChunk =
+        std::min(static_cast<size_t>(maxChunkSize_), remainingNonNulls);
     if (nonNullsInChunk == 0 || nonNullsInChunk < minChunkSize_ ||
         (ensureFullChunks_ && nonNullsInChunk < maxChunkSize_)) {
       return std::nullopt;

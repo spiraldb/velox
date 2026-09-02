@@ -120,8 +120,9 @@ bool shouldTokenize(
 
   uint64_t const maxEltValue =
       (eltWidth >= 8) ? UINT64_MAX : (1ull << (8 * eltWidth)) - 1;
-  uint64_t const maxCardValue =
-      std::min(std::min(maxEltValue, (uint64_t)nbElts), maxAlphabetSizeInElts);
+  uint64_t const maxCardValue = std::min(
+      std::min(maxEltValue, static_cast<uint64_t>(nbElts)),
+      static_cast<uint64_t>(maxAlphabetSizeInElts));
   auto const cardinality =
       ZL_estimateCardinality_fixed(src, nbElts, eltWidth, maxCardValue);
   if (cardinality.estimateUpperBound >= maxAlphabetSizeInElts) {

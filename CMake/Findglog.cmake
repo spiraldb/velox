@@ -43,4 +43,12 @@ if(NOT TARGET glog::glog)
     glog::glog
     PROPERTIES IMPORTED_LINK_INTERFACE_LANGUAGES "C" IMPORTED_LOCATION "${GLOG_LIBRARIES}"
   )
+  # Modern glog headers require this definition to include their export declarations.
+  if(EXISTS "${GLOG_INCLUDE_DIR}/glog/export.h")
+    set_property(
+      TARGET glog::glog
+      APPEND
+      PROPERTY INTERFACE_COMPILE_DEFINITIONS GLOG_USE_GLOG_EXPORT
+    )
+  endif()
 endif()

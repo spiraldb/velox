@@ -184,7 +184,7 @@ class TrackedColumnLoader : public velox::dwio::common::ColumnLoader {
         // Deal with schema evolution..
         const auto childrenCount = std::min(
             rowVector->childrenSize(),
-            static_cast<uint64_t>(localTypeWithId.size()));
+            static_cast<size_t>(localTypeWithId.size()));
         for (auto i = 0; i < childrenCount; i++) {
           updateRowSize(
               *localTypeWithId.childAt(i), resultSize, rowVector->childAt(i));

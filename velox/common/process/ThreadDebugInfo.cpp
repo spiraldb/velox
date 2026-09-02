@@ -16,6 +16,8 @@
 
 #include "velox/common/process/ThreadDebugInfo.h"
 
+#include <unistd.h>
+
 #include <folly/debugging/symbolizer/SignalHandler.h>
 #include <glog/logging.h>
 

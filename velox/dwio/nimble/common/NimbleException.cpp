@@ -128,6 +128,7 @@ void NimbleException::finalizeMessage() const {
     finalizedMessage_ += context_;
   }
 
+#if FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
   if (LIKELY(!exceptionFrames_.empty())) {
     std::vector<folly::symbolizer::SymbolizedFrame> symbolizedFrames;
     symbolizedFrames.resize(exceptionFrames_.size());
@@ -146,6 +147,7 @@ void NimbleException::finalizeMessage() const {
     finalizedMessage_ += "\nStack Trace:\n";
     finalizedMessage_ += printer.str();
   }
+#endif
 }
 
 NimbleUserError::NimbleUserError(
