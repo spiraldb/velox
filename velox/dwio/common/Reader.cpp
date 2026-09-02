@@ -24,8 +24,31 @@ RowReader::ProjectColumnsResult RowReader::projectColumnsWithSelection(
     const VectorPtr& input,
     const ScanSpec& spec,
     const Mutation* mutation) {
+  for (const auto& childSpec : spec.children()) {
+    VELOX_CHECK_NULL(
+        childSpec->deltaUpdate(),
+        "Delta updates require explicit source rows.");
+  }
+  return projectColumnsWithSelection(input, spec, mutation, {});
+}
+
+RowReader::ProjectColumnsResult RowReader::projectColumnsWithSelection(
+    const VectorPtr& input,
+    const ScanSpec& spec,
+    const Mutation* mutation,
+    RowSet sourceRows) {
   auto* inputRow = input->as<RowVector>();
   VELOX_CHECK_NOT_NULL(inputRow);
+  const auto hasDeltaUpdate = std::any_of(
+      spec.children().begin(), spec.children().end(), [](const auto& child) {
+        return child->deltaUpdate() != nullptr;
+      });
+  VELOX_CHECK(
+      (!hasDeltaUpdate && sourceRows.empty()) ||
+          sourceRows.size() == input->size(),
+      "Source-row count must match the input size: {}, {}",
+      sourceRows.size(),
+      input->size());
   auto& inputRowType = input->type()->asRow();
   column_index_t numColumns = 0;
   for (auto& childSpec : spec.children()) {
@@ -49,7 +72,6 @@ RowReader::ProjectColumnsResult RowReader::projectColumnsWithSelection(
     }
   }
   for (auto& childSpec : spec.children()) {
-    VELOX_CHECK_NULL(childSpec->deltaUpdate());
     VectorPtr child;
     TypePtr childType;
     if (childSpec->isConstant()) {
@@ -60,9 +82,12 @@ RowReader::ProjectColumnsResult RowReader::projectColumnsWithSelection(
       auto childIdx = inputRowType.getChildIdx(childSpec->fieldName());
       childType = inputRowType.childAt(childIdx);
       child = inputRow->childAt(childIdx);
-      if (child) {
-        childSpec->applyFilter(*child, inputRow->size(), passed.data());
-      }
+    }
+    if (child && childSpec->deltaUpdate()) {
+      childSpec->deltaUpdate()->update(sourceRows, child);
+    }
+    if (child) {
+      childSpec->applyFilter(*child, inputRow->size(), passed.data());
     }
     if (!childSpec->projectOut()) {
       continue;

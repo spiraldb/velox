@@ -191,6 +191,16 @@ class RowReader {
       const Mutation* mutation);
 
   /**
+   * Applies projection with explicit source-row positions for delta updates.
+   * Source rows must match the input size when a delta update is present.
+   */
+  static ProjectColumnsResult projectColumnsWithSelection(
+      const VectorPtr& input,
+      const velox::common::ScanSpec& spec,
+      const Mutation* mutation,
+      RowSet sourceRows);
+
+  /**
    * Helper function used by non-selective reader to project top level columns
    * according to the scan spec and mutations.
    */

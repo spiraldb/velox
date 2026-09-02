@@ -16,6 +16,7 @@
 
 #include "velox/dwio/common/Reader.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/vector/DecodedVector.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 #include <gmock/gmock.h>
@@ -30,6 +31,19 @@ class ReaderTest : public testing::Test, public velox::test::VectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+  }
+};
+
+class AddRowOffsetUpdater : public DeltaColumnUpdater {
+ public:
+  void update(const RowSet& baseRows, VectorPtr& result) override {
+    DecodedVector decoded{*result};
+    auto updated = BaseVector::create<FlatVector<int64_t>>(
+        BIGINT(), baseRows.size(), result->pool());
+    for (vector_size_t i = 0; i < baseRows.size(); ++i) {
+      updated->set(i, decoded.valueAt<int64_t>(i) + 10 * baseRows[i]);
+    }
+    result = std::move(updated);
   }
 };
 
@@ -538,6 +552,64 @@ TEST_F(ReaderTest, projectColumnsWithSelectionEmptyInput) {
   auto result = RowReader::projectColumnsWithSelection(input, spec, nullptr);
   EXPECT_EQ(result.output->size(), 0);
   EXPECT_EQ(result.selectedRows, nullptr);
+}
+
+TEST_F(ReaderTest, projectColumnsAppliesConstantFilter) {
+  auto input = makeRowVector({makeFlatVector<int64_t>({0, 1, 2})});
+  ScanSpec spec("<root>");
+  spec.addAllChildFields(*input->type());
+  auto* field = spec.childByName("c0");
+  field->setConstantValue(makeConstant<int64_t>(7, 1));
+  field->setFilter(createBigintValues({8}, false));
+
+  const auto result = RowReader::projectColumns(input, spec, nullptr);
+  EXPECT_EQ(result->size(), 0);
+}
+
+TEST_F(ReaderTest, projectColumnsAppliesDeltaUpdateBeforeFilter) {
+  auto input = makeRowVector({makeFlatVector<int64_t>({0, 1, 2})});
+  AddRowOffsetUpdater updater;
+  ScanSpec spec("<root>");
+  spec.addAllChildFields(*input->type());
+  auto* field = spec.childByName("c0");
+  field->setDeltaUpdate(&updater);
+  field->setFilter(createBigintValues({11, 22}, false));
+
+  const std::vector<vector_size_t> sourceRows{0, 1, 2};
+  const auto result =
+      RowReader::projectColumnsWithSelection(input, spec, nullptr, sourceRows)
+          .output;
+  test::assertEqualVectors(
+      makeRowVector({makeFlatVector<int64_t>({11, 22})}), result);
+}
+
+TEST_F(ReaderTest, projectColumnsRejectsDeltaUpdateWithoutSourceRows) {
+  auto input = makeRowVector({makeFlatVector<int64_t>({0, 1, 2})});
+  AddRowOffsetUpdater updater;
+  ScanSpec spec("<root>");
+  spec.addAllChildFields(*input->type());
+  spec.childByName("c0")->setDeltaUpdate(&updater);
+
+  VELOX_ASSERT_THROW(
+      RowReader::projectColumns(input, spec, nullptr),
+      "Delta updates require explicit source rows.");
+}
+
+TEST_F(ReaderTest, projectColumnsUsesExplicitDeltaSourceRows) {
+  auto input = makeRowVector({makeFlatVector<int64_t>({0, 1, 2})});
+  const std::vector<vector_size_t> sourceRows{4, 7, 9};
+  AddRowOffsetUpdater updater;
+  ScanSpec spec("<root>");
+  spec.addAllChildFields(*input->type());
+  auto* field = spec.childByName("c0");
+  field->setDeltaUpdate(&updater);
+  field->setFilter(createBigintValues({71, 92}, false));
+
+  const auto result =
+      RowReader::projectColumnsWithSelection(input, spec, nullptr, sourceRows)
+          .output;
+  test::assertEqualVectors(
+      makeRowVector({makeFlatVector<int64_t>({71, 92})}), result);
 }
 
 } // namespace
