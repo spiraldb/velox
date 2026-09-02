@@ -170,6 +170,7 @@ option(VELOX_ENABLE_ABFS "Build Abfs Connector" OFF)
 option(VELOX_ENABLE_HDFS "Build Hdfs Connector" OFF)
 option(VELOX_ENABLE_PARQUET "Enable Parquet support" ON)
 option(VELOX_ENABLE_NIMBLE "Enable Nimble support" OFF)
+option(VELOX_ENABLE_VORTEX "Enable Vortex support" OFF)
 option(VELOX_ENABLE_ARROW "Enable Arrow support" OFF)
 option(VELOX_ENABLE_GEO "Enable Geospatial support" ON)
 option(VELOX_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
@@ -180,6 +181,13 @@ option(
 )
 option(VELOX_ENABLE_CCACHE "Use ccache if installed." ON)
 option(VELOX_ENABLE_COMPRESSION_LZ4 "Enable Lz4 compression support." OFF)
+
+set(
+  VELOX_VORTEX_SOURCE_DIR
+  ""
+  CACHE PATH
+  "Use a local Vortex source checkout instead of the bundled archive."
+)
 
 option(VELOX_BUILD_TEST_UTILS "Builds Velox test utilities" OFF)
 option(VELOX_BUILD_VECTOR_TEST_UTILS "Builds Velox vector test utilities" OFF)
@@ -305,6 +313,15 @@ if(VELOX_ENABLE_FAISS)
   velox_resolve_dependency(faiss)
   if(NOT TARGET FAISS::faiss)
     add_library(FAISS::faiss ALIAS faiss)
+  endif()
+endif()
+
+if(VELOX_ENABLE_VORTEX)
+  if(NOT TARGET Vortex::vortex_velox)
+    # Vortex publishes the adapter as source. Local and pinned builds use the
+    # same Cargo path.
+    set(Vortex_SOURCE BUNDLED)
+    velox_resolve_dependency(Vortex)
   endif()
 endif()
 

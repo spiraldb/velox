@@ -15,6 +15,47 @@
 
 include(CMakeFindDependencyMacro)
 
+if("@VELOX_ENABLE_VORTEX@")
+  if(NOT TARGET Vortex::vortex_velox)
+    if(WIN32)
+      set(_vortex_library_name "vortex_velox.lib")
+    else()
+      set(_vortex_library_name "libvortex_velox.a")
+    endif()
+    add_library(Vortex::vortex_velox STATIC IMPORTED)
+    set_target_properties(
+      Vortex::vortex_velox
+      PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/${_vortex_library_name}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
+    )
+    find_dependency(Threads)
+    if(APPLE)
+      find_library(_vortex_corefoundation CoreFoundation REQUIRED)
+      find_library(_vortex_iconv iconv REQUIRED)
+      set_property(
+        TARGET Vortex::vortex_velox
+        APPEND
+        PROPERTY
+          INTERFACE_LINK_LIBRARIES "${_vortex_corefoundation};${_vortex_iconv}"
+      )
+    elseif(UNIX)
+      set_property(
+        TARGET Vortex::vortex_velox
+        APPEND
+        PROPERTY INTERFACE_LINK_LIBRARIES "Threads::Threads;${CMAKE_DL_LIBS};m;rt;util"
+      )
+    elseif(WIN32)
+      set_property(
+        TARGET Vortex::vortex_velox
+        APPEND
+        PROPERTY INTERFACE_LINK_LIBRARIES "advapi32;bcrypt;ntdll;userenv;ws2_32"
+      )
+    endif()
+    unset(_vortex_library_name)
+  endif()
+endif()
+
 block()
   list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 

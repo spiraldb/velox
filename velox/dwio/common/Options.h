@@ -73,6 +73,7 @@ enum class FileFormat {
       13, // Iceberg V3 Puffin blob container (e.g. deletion vectors).
           // Not consumed by dwio::ReaderFactory; read directly by the
           // Iceberg connector via FileSystem::pread of the blob byte-range.
+  VORTEX = 14,
 };
 
 VELOX_DECLARE_ENUM_NAME(FileFormat);

@@ -38,6 +38,7 @@ const auto& fileFormatNames() {
       {FileFormat::FLUX, "flux"},
       {FileFormat::AVRO, "avro"},
       {FileFormat::PUFFIN, "puffin"},
+      {FileFormat::VORTEX, "vortex"},
   };
   return kNames;
 }

@@ -38,6 +38,10 @@ add_subdirectory(orc)
 add_subdirectory(parquet)
 add_subdirectory(text)
 
+if(VELOX_ENABLE_VORTEX)
+  add_subdirectory(vortex)
+endif()
+
 if(VELOX_ENABLE_NIMBLE)
   add_subdirectory(nimble)
 endif()
