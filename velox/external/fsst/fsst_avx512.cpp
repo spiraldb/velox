@@ -15,6 +15,14 @@
 // IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 // You can contact the authors via the FSST source repository : https://github.com/cwida/fsst
+#define Symbol VeloxFsstSymbol
+#define QSymbol VeloxFsstQSymbol
+#define Counters VeloxFsstCounters
+#define SymbolTable VeloxFsstSymbolTable
+#define Encoder VeloxFsstEncoder
+#define SIMDjob VeloxFsstSIMDjob
+#define fsst_hasAVX512 nimble_fsst_hasAVX512
+#define fsst_compressAVX512 nimble_fsst_compressAVX512
 #include "libfsst.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)

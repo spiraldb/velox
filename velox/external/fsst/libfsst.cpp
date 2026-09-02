@@ -15,9 +15,25 @@
 // IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 // You can contact the authors via the FSST source repository : https://github.com/cwida/fsst
+#define Symbol VeloxFsstSymbol
+#define QSymbol VeloxFsstQSymbol
+#define Counters VeloxFsstCounters
+#define SymbolTable VeloxFsstSymbolTable
+#define Encoder VeloxFsstEncoder
+#define SIMDjob VeloxFsstSIMDjob
+#define fsst_hasAVX512 nimble_fsst_hasAVX512
+#define fsst_compressAVX512 nimble_fsst_compressAVX512
+#define fsst_create nimble_fsst_create
+#define fsst_duplicate nimble_fsst_duplicate
+#define fsst_export nimble_fsst_export
+#define fsst_destroy nimble_fsst_destroy
+#define fsst_import nimble_fsst_import
+#define fsst_decoder nimble_fsst_decoder
+#define fsst_compress nimble_fsst_compress
+#define fsst_decompress nimble_fsst_decompress
 #include "libfsst.hpp"
 
-Symbol concat(Symbol a, Symbol b) {
+static Symbol concat(Symbol a, Symbol b) {
    Symbol s;
    u32 length = a.length()+b.length();
    if (length > Symbol::maxLength) length = Symbol::maxLength; 
@@ -48,9 +64,9 @@ class hash<QSymbol> {
 };
 }
 
-bool isEscapeCode(u16 pos) { return pos < FSST_CODE_BASE; }
+static bool isEscapeCode(u16 pos) { return pos < FSST_CODE_BASE; }
 
-std::ostream& operator<<(std::ostream& out, const Symbol& s) {
+static std::ostream& operator<<(std::ostream& out, const Symbol& s) {
    for (u32 i=0; i<s.length(); i++)
       out << s.val.str[i];
    return out;

@@ -45,8 +45,8 @@
  * We optionally support C-style zero-terminated strings (zero appearing only at the end). In this case, the compressed strings are 
  * also zero-terminated strings. In zero-terminated mode, the zero-byte at the end *is* counted in the string byte-length.
  */
-#ifndef FSST_INCLUDED_H
-#define FSST_INCLUDED_H
+#ifndef VELOX_FSST_INCLUDED_H
+#define VELOX_FSST_INCLUDED_H
 
 #ifdef _MSC_VER
 #define __restrict__ 
@@ -224,4 +224,4 @@ fsst_decompress(
 #ifdef __cplusplus
 }
 #endif
-#endif /* FSST_INCLUDED_H */
+#endif /* VELOX_FSST_INCLUDED_H */

@@ -39,7 +39,7 @@
 #define fsst_decoder nimble_fsst_decoder
 #define fsst_compress nimble_fsst_compress
 #define fsst_decompress nimble_fsst_decompress
-#include <fsst.h>
+#include "velox/external/fsst/fsst.h"
 #pragma pop_macro("fsst_decompress")
 #pragma pop_macro("fsst_compress")
 #pragma pop_macro("fsst_decoder")
