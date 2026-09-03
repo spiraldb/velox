@@ -22,6 +22,7 @@ velox_add_library(
   VortexSplitMapper.cpp
   VortexType.cpp
   VortexVector.cpp
+  VortexVectorVisitor.cpp
   HEADERS
   RegisterVortexReader.h
   VortexArray.h
@@ -32,6 +33,7 @@ velox_add_library(
   VortexSplitMapper.h
   VortexType.h
   VortexVector.h
+  VortexVectorVisitor.h
 )
 
 velox_link_libraries(
