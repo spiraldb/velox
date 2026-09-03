@@ -26,9 +26,9 @@
 #include "velox/dwio/vortex/VortexSplitMapper.h"
 #include "velox/dwio/vortex/VortexVector.h"
 
-struct vx_data_source;
-struct vx_partition;
-struct vx_scan;
+struct vx_velox_data_source;
+struct vx_velox_partition;
+struct vx_velox_scan;
 
 namespace facebook::velox::dwio::vortex {
 
@@ -213,13 +213,13 @@ class VortexRowReader : public common::RowReader {
   uint64_t currentRow_{0};
 
   // Owns the Vortex data source for this row reader.
-  const vx_data_source* dataSource_{nullptr};
+  const vx_velox_data_source* dataSource_{nullptr};
 
   // Owns the active Vortex scan.
-  vx_scan* scan_{nullptr};
+  vx_velox_scan* scan_{nullptr};
 
   // Owns the active scan partition.
-  vx_partition* partition_{nullptr};
+  vx_velox_partition* partition_{nullptr};
 
   // Records whether the owned row range finished.
   bool exhausted_{false};

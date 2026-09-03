@@ -26,7 +26,7 @@
 namespace facebook::velox::dwio::vortex {
 namespace {
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
@@ -37,7 +37,9 @@ std::string errorMessage(const vx_error* error) {
   return std::string{message.ptr, message.len};
 }
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error) {
+[[noreturn]] void failVortex(
+    std::string_view operation,
+    vx_velox_error* error) {
   const auto errorText = errorMessage(error);
   vx_velox_error_free(error);
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
@@ -69,7 +71,7 @@ TypePtr typeFromVortexSource(const vx_velox_source* source) {
   VELOX_USER_CHECK_NOT_NULL(source, "Vortex source must not be null");
 
   ArrowSchemaOwner schema;
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   if (vx_velox_source_export_schema(source, schema.get(), &error) != 0) {
     failVortex("read the Vortex schema", error);
   }

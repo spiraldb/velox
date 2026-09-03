@@ -39,7 +39,7 @@ namespace {
 static_assert(sizeof(vx_velox_binary_view) == sizeof(StringView));
 static_assert(StringView::kInlineSize == 12);
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error);
+[[noreturn]] void failVortex(std::string_view operation, vx_velox_error* error);
 
 class VortexBufferLifetime {
  public:
@@ -101,7 +101,7 @@ struct SharedBufferReleaser {
 };
 
 struct PrimitiveCapture {
-  const vx_session* session;
+  const vx_velox_session* session;
   TypePtr targetType;
   memory::MemoryPool* pool;
   ValueHook* hook{nullptr};
@@ -819,7 +819,7 @@ VectorPtr importPreparedCursor(
       .memoryPrecharged = parent.memoryPrecharged,
   };
   const auto visitor = makeVisitor(child);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   if (vx_velox_export_cursor_visit(cursor, offset, length, &visitor, &error) !=
       0) {
     failVortex("visit a prepared Vortex child array", error);
@@ -1393,7 +1393,7 @@ const char* rowIndexError(void* rawContext) {
   return static_cast<RowIndexCapture*>(rawContext)->error.data();
 }
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
@@ -1401,7 +1401,9 @@ std::string errorMessage(const vx_error* error) {
   return std::string{message.ptr, message.len};
 }
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error) {
+[[noreturn]] void failVortex(
+    std::string_view operation,
+    vx_velox_error* error) {
   const auto errorText = errorMessage(error);
   vx_velox_error_free(error);
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
@@ -1427,13 +1429,13 @@ std::vector<uint64_t> visitorRows(RowSet rows, size_t arraySize) {
 }
 
 VectorPtr importArrow(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     memory::MemoryPool& pool) {
   ArrowSchema schema{};
   ArrowArray arrowArray{};
   VortexArrowMemory memory{pool};
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   const auto status = vx_velox_array_export_arrow(
       session, array.get(), &memory.callbacks(), &schema, &arrowArray, &error);
   if (status != 0) {
@@ -1681,7 +1683,7 @@ const char* VortexArrowMemory::lastError(void* rawContext) noexcept {
 }
 
 struct VortexExportCursor::State {
-  State(const vx_session* session, VortexArray array)
+  State(const vx_velox_session* session, VortexArray array)
       : session{session},
         array{std::move(array)},
         cursor{nullptr, vx_velox_export_cursor_free} {}
@@ -1695,7 +1697,7 @@ struct VortexExportCursor::State {
     }
     pool = &memoryPool;
     memory = std::make_unique<VortexArrowMemory>(memoryPool);
-    vx_error* error{nullptr};
+    vx_velox_error* error{nullptr};
     auto* exportCursor = vx_velox_export_cursor_new(
         session, array.get(), &memory->callbacks(), &error);
     if (exportCursor == nullptr) {
@@ -1705,7 +1707,7 @@ struct VortexExportCursor::State {
     return cursor.get();
   }
 
-  const vx_session* session;
+  const vx_velox_session* session;
   VortexArray array;
   memory::MemoryPool* pool{nullptr};
   std::unique_ptr<VortexArrowMemory> memory;
@@ -1718,7 +1720,7 @@ struct VortexExportCursor::State {
 };
 
 VortexExportCursor::VortexExportCursor(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array)
     : state_{std::make_unique<State>(session, array)} {}
 
@@ -1752,7 +1754,7 @@ VectorPtr VortexExportCursor::import(
         .memoryPrecharged = true,
     };
     const auto visitor = makeVisitor(capture);
-    vx_error* error{nullptr};
+    vx_velox_error* error{nullptr};
     if (vx_velox_export_cursor_visit(
             state_->ensureCursor(pool), offset, length, &visitor, &error) !=
         0) {
@@ -1880,7 +1882,7 @@ bool supportsNativeVortexType(const TypePtr& type) {
 }
 
 VortexRowPositions readVortexRowIndices(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     memory::MemoryPool& pool) {
   RowIndexCapture capture{.pool = &pool};
@@ -1903,7 +1905,7 @@ VortexRowPositions readVortexRowIndices(
       .visit_list = nullptr,
       .visit_map = nullptr,
   };
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   if (vx_velox_array_visit(session, array.get(), &request, &visitor, &error) !=
       0) {
     failVortex("read Vortex row indexes", error);
@@ -1913,7 +1915,7 @@ VortexRowPositions readVortexRowIndices(
 }
 
 VectorPtr importVortexVector(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     const TypePtr& targetType,
     RowSet sourceRows,
@@ -1948,7 +1950,7 @@ VectorPtr importVortexVector(
       .row_count = rows.size(),
   };
   const auto visitor = makeVisitor(capture);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   if (vx_velox_array_visit(session, array.get(), &request, &visitor, &error) !=
       0) {
     failVortex("visit a Vortex primitive array", error);
@@ -1958,7 +1960,7 @@ VectorPtr importVortexVector(
 }
 
 void loadVortexValueHook(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     const TypePtr& targetType,
     RowSet sourceRows,
@@ -1985,7 +1987,7 @@ void loadVortexValueHook(
       .row_count = rows.size(),
   };
   const auto visitor = makeVisitor(capture);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   if (vx_velox_array_visit(session, array.get(), &request, &visitor, &error) !=
       0) {
     failVortex("load a Vortex value hook", error);

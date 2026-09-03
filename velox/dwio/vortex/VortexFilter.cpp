@@ -25,15 +25,18 @@
 namespace facebook::velox::dwio::vortex {
 namespace {
 
-using ScalarPtr = std::unique_ptr<vx_scalar, decltype(&vx_velox_scalar_free)>;
+using ScalarPtr =
+    std::unique_ptr<vx_velox_scalar, decltype(&vx_velox_scalar_free)>;
 using DTypePtr =
-    std::unique_ptr<const vx_dtype, decltype(&vx_velox_dtype_free)>;
+    std::unique_ptr<const vx_velox_dtype, decltype(&vx_velox_dtype_free)>;
 
-VortexExpressionPtr expression(vx_expression* value) {
+VortexExpressionPtr expression(vx_velox_expression* value) {
   return VortexExpressionPtr{value};
 }
 
-[[noreturn]] void failLiteral(std::string_view operation, vx_error* error) {
+[[noreturn]] void failLiteral(
+    std::string_view operation,
+    vx_velox_error* error) {
   std::string detail{"Vortex returned an unspecified error"};
   if (error != nullptr) {
     const auto view = vx_velox_error_message(error);
@@ -45,8 +48,8 @@ VortexExpressionPtr expression(vx_expression* value) {
   VELOX_FAIL("Failed to {}: {}", operation, detail);
 }
 
-VortexExpressionPtr literal(const vx_scalar* scalar) {
-  vx_error* error{nullptr};
+VortexExpressionPtr literal(const vx_velox_scalar* scalar) {
+  vx_velox_error* error{nullptr};
   auto result = expression(vx_velox_expression_literal(scalar, &error));
   if (error != nullptr) {
     failLiteral("create a Vortex literal expression", error);
@@ -85,7 +88,7 @@ ScalarPtr integerScalar(const Type& type, int64_t value) {
 
 VortexExpressionPtr scalarLiteral(const Type& type, int64_t value) {
   if (type.isDate()) {
-    vx_error* error{nullptr};
+    vx_velox_error* error{nullptr};
     ScalarPtr scalar{
         vx_velox_scalar_new_date_days(
             static_cast<int32_t>(value), false, &error),
@@ -120,9 +123,9 @@ VortexExpressionPtr scalarLiteral(const Type& type, double value) {
 }
 
 VortexExpressionPtr scalarLiteral(const Type& type, std::string_view value) {
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   ScalarPtr scalar{nullptr, vx_velox_scalar_free};
-  const vx_view view{value.data(), value.size()};
+  const vx_velox_view view{value.data(), value.size()};
   if (type.kind() == TypeKind::VARCHAR) {
     scalar.reset(vx_velox_scalar_new_utf8(view, false, &error));
   } else if (type.kind() == TypeKind::VARBINARY) {
@@ -146,9 +149,9 @@ VortexExpressionPtr scalarLiteral(const Type& type, std::string_view value) {
 
 VortexExpressionPtr binary(
     vx_velox_binary_operator operation,
-    const vx_expression* left,
-    const vx_expression* right) {
-  vx_error* error{nullptr};
+    const vx_velox_expression* left,
+    const vx_velox_expression* right) {
+  vx_velox_error* error{nullptr};
   auto result =
       expression(vx_velox_expression_binary(operation, left, right, &error));
   if (error != nullptr) {
@@ -169,7 +172,7 @@ VortexExpressionPtr conjunction(std::vector<VortexExpressionPtr> children) {
   if (children.size() == 1) {
     return std::move(children.front());
   }
-  std::vector<const vx_expression*> expressions;
+  std::vector<const vx_velox_expression*> expressions;
   expressions.reserve(children.size());
   for (const auto& child : children) {
     expressions.push_back(child.get());
@@ -189,7 +192,7 @@ VortexExpressionPtr disjunction(std::vector<VortexExpressionPtr> children) {
   if (children.size() == 1) {
     return std::move(children.front());
   }
-  std::vector<const vx_expression*> expressions;
+  std::vector<const vx_velox_expression*> expressions;
   expressions.reserve(children.size());
   for (const auto& child : children) {
     expressions.push_back(child.get());
@@ -205,17 +208,17 @@ VortexExpressionPtr negate(VortexExpressionPtr child) {
   return expression(vx_velox_expression_not(child.get()));
 }
 
-VortexExpressionPtr isNull(const vx_expression* column) {
+VortexExpressionPtr isNull(const vx_velox_expression* column) {
   return expression(vx_velox_expression_is_null(column));
 }
 
-VortexExpressionPtr isNotNull(const vx_expression* column) {
+VortexExpressionPtr isNotNull(const vx_velox_expression* column) {
   return negate(isNull(column));
 }
 
 VortexExpressionPtr compare(
     vx_velox_binary_operator operation,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     VortexExpressionPtr literal) {
   if (literal == nullptr) {
     return nullptr;
@@ -225,7 +228,7 @@ VortexExpressionPtr compare(
 
 VortexExpressionPtr applyNullSemantics(
     const velox::common::Filter& filter,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     VortexExpressionPtr nonNullPredicate) {
   if (nonNullPredicate == nullptr) {
     return nullptr;
@@ -291,7 +294,7 @@ VortexExpressionPtr integerListLiteral(
     return nullptr;
   }
 
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   DTypePtr elementType{
       vx_velox_dtype_new_primitive(ptype.value(), false, &error),
       vx_velox_dtype_free};
@@ -301,7 +304,7 @@ VortexExpressionPtr integerListLiteral(
   VELOX_CHECK_NOT_NULL(elementType);
 
   std::vector<ScalarPtr> elements;
-  std::vector<const vx_scalar*> elementPointers;
+  std::vector<const vx_velox_scalar*> elementPointers;
   elements.reserve(values.size());
   elementPointers.reserve(values.size());
   for (const auto value : values) {
@@ -327,7 +330,7 @@ VortexExpressionPtr integerListLiteral(
 
 VortexExpressionPtr integerRange(
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     int64_t lower,
     int64_t upper) {
   const auto bounds = integerBounds(type);
@@ -365,7 +368,7 @@ VortexExpressionPtr integerRange(
 
 VortexExpressionPtr integerValues(
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     std::vector<int64_t> values) {
   if (type.isDate()) {
     return nullptr;
@@ -401,7 +404,7 @@ VortexExpressionPtr integerValues(
 template <typename TRange>
 VortexExpressionPtr floatingRange(
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     const TRange& range) {
   const bool typeMatches =
       (range.kind() == velox::common::FilterKind::kFloatRange &&
@@ -464,7 +467,7 @@ VortexExpressionPtr floatingRange(
 
 VortexExpressionPtr bytesRange(
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     const velox::common::BytesRange& range) {
   if (type.kind() != TypeKind::VARCHAR && type.kind() != TypeKind::VARBINARY) {
     return nullptr;
@@ -492,7 +495,7 @@ VortexExpressionPtr bytesRange(
 
 VortexExpressionPtr bytesValues(
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     const folly::F14FastSet<std::string>& values) {
   if (type.kind() != TypeKind::VARCHAR && type.kind() != TypeKind::VARBINARY) {
     return nullptr;
@@ -520,7 +523,7 @@ VortexExpressionPtr bytesValues(
 VortexExpressionPtr convertNonNullFilter(
     const velox::common::Filter& filter,
     const Type& type,
-    const vx_expression* column) {
+    const vx_velox_expression* column) {
   switch (filter.kind()) {
     case velox::common::FilterKind::kAlwaysFalse:
       return booleanLiteral(false);
@@ -627,7 +630,7 @@ VortexExpressionPtr convertNonNullFilter(
 VortexExpressionPtr convertFilter(
     const velox::common::Filter& filter,
     const Type& type,
-    const vx_expression* column) {
+    const vx_velox_expression* column) {
   if (!filter.isDeterministic()) {
     return nullptr;
   }
@@ -658,7 +661,7 @@ void addResidualSubtree(
 void convertScanSpec(
     const velox::common::ScanSpec& scanSpec,
     const Type& type,
-    const vx_expression* column,
+    const vx_velox_expression* column,
     uint32_t depth,
     std::vector<VortexExpressionPtr>& expressions,
     VortexFilterConversion& conversion) {
@@ -703,7 +706,7 @@ void convertScanSpec(
       continue;
     }
     const auto& fieldName = rowType.nameOf(childIndex.value());
-    const vx_view fieldView{fieldName.data(), fieldName.size()};
+    const vx_velox_view fieldView{fieldName.data(), fieldName.size()};
     auto childColumn =
         expression(vx_velox_expression_get_item(fieldView, column));
     if (childColumn == nullptr) {
@@ -722,7 +725,8 @@ void convertScanSpec(
 
 } // namespace
 
-void VortexExpressionDeleter::operator()(vx_expression* expression) const {
+void VortexExpressionDeleter::operator()(
+    vx_velox_expression* expression) const {
   if (expression != nullptr) {
     vx_velox_expression_free(expression);
   }
@@ -763,7 +767,7 @@ std::vector<VortexMetadataFilterConversion> convertVortexMetadataFilters(
     }
 
     const auto& fieldName = rowType.nameOf(sourceChannel.value());
-    const vx_view fieldView{fieldName.data(), fieldName.size()};
+    const vx_velox_view fieldView{fieldName.data(), fieldName.size()};
     auto column =
         expression(vx_velox_expression_get_item(fieldView, root.get()));
     if (column == nullptr) {

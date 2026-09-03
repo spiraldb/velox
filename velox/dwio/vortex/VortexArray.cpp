@@ -22,7 +22,7 @@
 namespace facebook::velox::dwio::vortex {
 namespace {
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
@@ -30,7 +30,9 @@ std::string errorMessage(const vx_error* error) {
   return std::string{message.ptr, message.len};
 }
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error) {
+[[noreturn]] void failVortex(
+    std::string_view operation,
+    vx_velox_error* error) {
   const auto errorText = errorMessage(error);
   vx_velox_error_free(error);
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
@@ -38,13 +40,13 @@ std::string errorMessage(const vx_error* error) {
 
 } // namespace
 
-VortexArray VortexArray::fromOwned(const vx_array* array) {
+VortexArray VortexArray::fromOwned(const vx_velox_array* array) {
   VELOX_USER_CHECK_NOT_NULL(array, "Vortex array must not be null");
   return VortexArray{
-      std::shared_ptr<const vx_array>{array, vx_velox_array_free}};
+      std::shared_ptr<const vx_velox_array>{array, vx_velox_array_free}};
 }
 
-VortexArray::VortexArray(std::shared_ptr<const vx_array> array)
+VortexArray::VortexArray(std::shared_ptr<const vx_velox_array> array)
     : array_{std::move(array)} {}
 
 size_t VortexArray::size() const {
@@ -52,10 +54,11 @@ size_t VortexArray::size() const {
   return vx_velox_array_len(array_.get());
 }
 
-VortexArray VortexArray::field(const vx_session* session, size_t index) const {
+VortexArray VortexArray::field(const vx_velox_session* session, size_t index)
+    const {
   VELOX_CHECK_NOT_NULL(session);
   VELOX_CHECK_NOT_NULL(array_);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   const auto* field =
       vx_velox_array_get_field(session, array_.get(), index, &error);
   if (field == nullptr) {
@@ -66,7 +69,7 @@ VortexArray VortexArray::field(const vx_session* session, size_t index) const {
 
 VortexArray VortexArray::slice(size_t begin, size_t end) const {
   VELOX_CHECK_NOT_NULL(array_);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   const auto* sliced = vx_velox_array_slice(array_.get(), begin, end, &error);
   if (sliced == nullptr) {
     failVortex("slice a Vortex array", error);
@@ -74,7 +77,7 @@ VortexArray VortexArray::slice(size_t begin, size_t end) const {
   return fromOwned(sliced);
 }
 
-const vx_array* VortexArray::get() const {
+const vx_velox_array* VortexArray::get() const {
   return array_.get();
 }
 

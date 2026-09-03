@@ -259,7 +259,7 @@ int32_t isCancelled(void* context) noexcept {
   }
 }
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
@@ -267,15 +267,18 @@ std::string errorMessage(const vx_error* error) {
   return std::string{message.ptr, message.len};
 }
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error) {
+[[noreturn]] void failVortex(
+    std::string_view operation,
+    vx_velox_error* error) {
   const auto errorText = errorMessage(error);
   vx_velox_error_free(error);
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
 }
 
-const vx_session* defaultSession() {
-  static const std::unique_ptr<vx_session, decltype(&vx_velox_session_free)>
-      session{vx_velox_session_new(), vx_velox_session_free};
+const vx_velox_session* defaultSession() {
+  static const std::
+      unique_ptr<vx_velox_session, decltype(&vx_velox_session_free)>
+          session{vx_velox_session_new(), vx_velox_session_free};
   VELOX_CHECK_NOT_NULL(session);
   return session.get();
 }
@@ -310,7 +313,7 @@ VortexFile::VortexFile(
       "The Vortex Velox adapter lacks required capabilities: {}",
       kRequiredCapabilities & ~vx_velox_capabilities());
 
-  std::unique_ptr<vx_session, decltype(&vx_velox_session_free)> session{
+  std::unique_ptr<vx_velox_session, decltype(&vx_velox_session_free)> session{
       vx_velox_session_clone(defaultSession()), vx_velox_session_free};
   VELOX_CHECK_NOT_NULL(session);
 
@@ -327,7 +330,7 @@ VortexFile::VortexFile(
       .concurrency = kReadConcurrencyHint,
   };
 
-  vx_error* error = nullptr;
+  vx_velox_error* error = nullptr;
   std::unique_ptr<vx_velox_read_at, decltype(&vx_velox_read_at_free)> reader{
       vx_velox_read_at_new(&callbacks, &error), vx_velox_read_at_free};
   if (reader == nullptr) {
@@ -390,12 +393,12 @@ const std::vector<std::pair<uint64_t, uint64_t>>& VortexFile::naturalSplits()
   return naturalSplits_;
 }
 
-const vx_session* VortexFile::session() const {
+const vx_velox_session* VortexFile::session() const {
   return session_;
 }
 
-const vx_data_source* VortexFile::createDataSource() const {
-  vx_error* error = nullptr;
+const vx_velox_data_source* VortexFile::createDataSource() const {
+  vx_velox_error* error = nullptr;
   auto* dataSource = vx_velox_source_data_source(source_, &error);
   if (dataSource == nullptr) {
     failVortex("create a Vortex data source", error);
@@ -404,11 +407,11 @@ const vx_data_source* VortexFile::createDataSource() const {
 }
 
 std::vector<uint8_t> VortexFile::pruneNaturalSplits(
-    const vx_expression* expression,
+    const vx_velox_expression* expression,
     size_t firstSplit,
     size_t splitCount) const {
   std::vector<uint8_t> decisions(splitCount);
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   const auto status = vx_velox_source_prune_natural_splits(
       source_,
       expression,

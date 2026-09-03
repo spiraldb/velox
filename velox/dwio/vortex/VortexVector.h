@@ -23,7 +23,7 @@
 #include "velox/dwio/vortex/VortexFfi.h"
 #include "velox/vector/LazyVector.h"
 
-struct vx_session;
+struct vx_velox_session;
 
 namespace facebook::velox::dwio::vortex {
 
@@ -61,7 +61,7 @@ class VortexArrowMemory {
 class VortexExportCursor {
  public:
   /// Retains one array for later repeated native exports.
-  VortexExportCursor(const vx_session* session, const VortexArray& array);
+  VortexExportCursor(const vx_velox_session* session, const VortexArray& array);
 
   ~VortexExportCursor();
 
@@ -121,13 +121,13 @@ bool supportsNativeVortexType(const TypePtr& type);
 
 /// Retains a non-null U64 Vortex array as absolute row positions.
 VortexRowPositions readVortexRowIndices(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     memory::MemoryPool& pool);
 
 /// Imports selected source rows into a compact Velox vector.
 VectorPtr importVortexVector(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     const TypePtr& targetType,
     RowSet sourceRows,
@@ -135,7 +135,7 @@ VectorPtr importVortexVector(
 
 /// Sends selected source rows directly to a Velox value hook.
 void loadVortexValueHook(
-    const vx_session* session,
+    const vx_velox_session* session,
     const VortexArray& array,
     const TypePtr& targetType,
     RowSet sourceRows,

@@ -23,32 +23,33 @@
 #include "velox/common/testutil/TempFilePath.h"
 #include "velox/dwio/vortex/VortexFfi.h"
 #include "velox/vector/arrow/Bridge.h"
+#include "vortex_velox_test.h"
 
 namespace facebook::velox::test {
 namespace {
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
-  const auto message = vx_error_message(error);
+  const auto message = vx_velox_error_message(error);
   return std::string{message.ptr, message.len};
 }
 
-void checkVortexError(vx_error*& error) {
+void checkVortexError(vx_velox_error*& error) {
   if (error == nullptr) {
     return;
   }
   const auto errorText = errorMessage(error);
-  vx_error_free(error);
+  vx_velox_error_free(error);
   error = nullptr;
   VELOX_FAIL("Vortex test operation failed: {}", errorText);
 }
 
-struct SinkReleaser {
-  void operator()(vx_array_sink* sink) const {
-    if (sink != nullptr) {
-      vx_array_sink_abort(sink);
+struct WriterReleaser {
+  void operator()(vx_velox_test_writer* writer) const {
+    if (writer != nullptr) {
+      vx_velox_test_writer_abort(writer);
     }
   }
 };
@@ -62,41 +63,24 @@ void writeVortexFile(
     const ArrowOptions& arrowOptions) {
   VELOX_CHECK_NOT_NULL(pool);
   VELOX_CHECK(!batches.empty());
-  std::unique_ptr<vx_session, decltype(&vx_session_free)> session{
-      vx_session_new(), vx_session_free};
-  VELOX_CHECK_NOT_NULL(session);
-
-  vx_error* error{nullptr};
-  const vx_view pathView{path.data(), path.size()};
-  std::unique_ptr<vx_array_sink, SinkReleaser> sink;
+  vx_velox_error* error{nullptr};
+  const vx_velox_view pathView{path.data(), path.size()};
+  std::unique_ptr<vx_velox_test_writer, WriterReleaser> writer{
+      vx_velox_test_writer_new(pathView, &error)};
+  checkVortexError(error);
+  VELOX_CHECK_NOT_NULL(writer);
   for (const auto& batch : batches) {
     ArrowArray arrowArray{};
     ArrowSchema arrowSchema{};
     exportToArrow(batch, arrowArray, pool, arrowOptions);
     exportToArrow(batch, arrowSchema, arrowOptions);
-    std::unique_ptr<const vx_array, decltype(&vx_array_free)> array{
-        vx_array_from_arrow(
-            session.get(), &arrowArray, &arrowSchema, false, &error),
-        vx_array_free};
-    checkVortexError(error);
-    VELOX_CHECK_NOT_NULL(array);
-
-    if (sink == nullptr) {
-      std::unique_ptr<const vx_dtype, decltype(&vx_dtype_free)> dtype{
-          vx_array_dtype(array.get()), vx_dtype_free};
-      VELOX_CHECK_NOT_NULL(dtype);
-      sink.reset(vx_array_sink_open_file(
-          session.get(), pathView, dtype.get(), &error));
-      checkVortexError(error);
-      VELOX_CHECK_NOT_NULL(sink);
-    }
-    vx_array_sink_push(sink.get(), array.get(), &error);
+    vx_velox_test_writer_push(writer.get(), &arrowArray, &arrowSchema, &error);
     checkVortexError(error);
   }
 
-  auto* rawSink = sink.release();
-  VELOX_CHECK_NOT_NULL(rawSink);
-  vx_array_sink_close(rawSink, &error);
+  auto* rawWriter = writer.release();
+  VELOX_CHECK_NOT_NULL(rawWriter);
+  vx_velox_test_writer_close(rawWriter, &error);
   checkVortexError(error);
 }
 

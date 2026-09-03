@@ -30,6 +30,7 @@
 #include "velox/dwio/vortex/VortexFfi.h"
 #include "velox/vector/arrow/Bridge.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
+#include "vortex_velox_test.h"
 
 namespace facebook::velox::dwio::vortex {
 namespace {
@@ -40,20 +41,20 @@ static_assert(std::is_same_v<vx_velox_scan_selection_include, uint32_t>);
 static_assert(std::is_same_v<vx_velox_primitive_type, uint32_t>);
 static_assert(std::is_same_v<vx_velox_validity_kind, uint32_t>);
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
-  const auto message = vx_error_message(error);
+  const auto message = vx_velox_error_message(error);
   return std::string{message.ptr, message.len};
 }
 
-void checkVortexError(vx_error*& error) {
+void checkVortexError(vx_velox_error*& error) {
   if (error == nullptr) {
     return;
   }
   const auto errorText = errorMessage(error);
-  vx_error_free(error);
+  vx_velox_error_free(error);
   error = nullptr;
   VELOX_FAIL("Vortex filter test failed: {}", errorText);
 }
@@ -85,30 +86,25 @@ class VortexFilterTest : public testing::Test,
   }
 
   void SetUp() override {
-    session_ = vx_session_new();
+    session_ = vx_velox_session_new();
     VELOX_CHECK_NOT_NULL(session_);
   }
 
   void TearDown() override {
-    vx_session_free(session_);
+    vx_velox_session_free(session_);
     session_ = nullptr;
   }
 
   VectorPtr applyExpression(
       const RowVectorPtr& input,
-      const vx_expression* expression) {
+      const vx_velox_expression* expression) {
     ArrowArray inputArray{};
     ArrowSchema inputSchema{};
     exportToArrow(input, inputArray, pool());
     exportToArrow(input, inputSchema);
-    vx_error* error{nullptr};
-    const auto* vortexInput =
-        vx_array_from_arrow(session_, &inputArray, &inputSchema, false, &error);
-    checkVortexError(error);
-    VELOX_CHECK_NOT_NULL(vortexInput);
-
-    const auto* vortexResult = vx_array_apply(vortexInput, expression, &error);
-    vx_array_free(vortexInput);
+    vx_velox_error* error{nullptr};
+    const auto* vortexResult = vx_velox_test_array_from_arrow_apply(
+        session_, &inputArray, &inputSchema, expression, &error);
     checkVortexError(error);
     VELOX_CHECK_NOT_NULL(vortexResult);
 
@@ -131,7 +127,7 @@ class VortexFilterTest : public testing::Test,
         &resultSchema,
         &resultArray,
         &error);
-    vx_array_free(vortexResult);
+    vx_velox_array_free(vortexResult);
     checkVortexError(error);
     VELOX_CHECK_EQ(status, 0);
     return importFromArrowAsOwner(resultSchema, resultArray, pool());
@@ -162,7 +158,7 @@ class VortexFilterTest : public testing::Test,
         applyExpression(input, conversion.expression.get()));
   }
 
-  vx_session* session_{nullptr};
+  vx_velox_session* session_{nullptr};
 };
 
 struct IntegerFilterCase {
@@ -246,8 +242,8 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 TEST_F(VortexFilterTest, rejectsInvalidFixedWidthAbiValues) {
-  vx_error* error{nullptr};
-  std::unique_ptr<const vx_dtype, decltype(&vx_velox_dtype_free)> dtype{
+  vx_velox_error* error{nullptr};
+  std::unique_ptr<const vx_velox_dtype, decltype(&vx_velox_dtype_free)> dtype{
       vx_velox_dtype_new_primitive(
           std::numeric_limits<uint32_t>::max(), false, &error),
       vx_velox_dtype_free};

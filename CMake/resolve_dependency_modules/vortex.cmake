@@ -82,10 +82,6 @@ endif()
 if(NOT EXISTS "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude/vortex_velox.h")
   message(FATAL_ERROR "Vortex source does not contain vortex_velox.h: ${VORTEX_SOURCE_DIR}")
 endif()
-if(NOT EXISTS "${VORTEX_SOURCE_DIR}/vortex-ffi/cinclude/vortex.h")
-  message(FATAL_ERROR "Vortex source does not contain vortex.h: ${VORTEX_SOURCE_DIR}")
-endif()
-
 find_program(
   VORTEX_CARGO_EXECUTABLE
   NAMES cargo
@@ -154,16 +150,13 @@ set_target_properties(
     IMPORTED_LOCATION_RELEASE "${VORTEX_CARGO_TARGET_DIR}/release/${VORTEX_VELOX_LIBRARY_NAME}"
     IMPORTED_LOCATION_RELWITHDEBINFO
       "${VORTEX_CARGO_TARGET_DIR}/release_debug/${VORTEX_VELOX_LIBRARY_NAME}"
-    INTERFACE_INCLUDE_DIRECTORIES
-      "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude;${VORTEX_SOURCE_DIR}/vortex-ffi/cinclude"
+    INTERFACE_INCLUDE_DIRECTORIES "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude"
 )
 add_library(Vortex::vortex_velox ALIAS vortex_velox_rust)
 
 install(FILES "${VORTEX_VELOX_LIBRARY}" DESTINATION lib COMPONENT velox_libraries)
 install(
-  FILES
-    "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude/vortex_velox.h"
-    "${VORTEX_SOURCE_DIR}/vortex-ffi/cinclude/vortex.h"
+  FILES "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude/vortex_velox.h"
   DESTINATION include
   COMPONENT velox_headers
 )
@@ -192,8 +185,5 @@ elseif(WIN32)
 endif()
 
 set(Vortex_FOUND TRUE)
-set(
-  Vortex_INCLUDE_DIRS
-  "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude;${VORTEX_SOURCE_DIR}/vortex-ffi/cinclude"
-)
+set(Vortex_INCLUDE_DIRS "${VORTEX_SOURCE_DIR}/vortex-velox/cinclude")
 set(Vortex_LIBRARIES Vortex::vortex_velox)

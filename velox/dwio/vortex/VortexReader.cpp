@@ -37,7 +37,7 @@ namespace {
 
 constexpr std::string_view kVortexRowIndexField{"$velox_vortex_row_index"};
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
@@ -45,7 +45,9 @@ std::string errorMessage(const vx_error* error) {
   return std::string{message.ptr, message.len};
 }
 
-[[noreturn]] void failVortex(std::string_view operation, vx_error* error) {
+[[noreturn]] void failVortex(
+    std::string_view operation,
+    vx_velox_error* error) {
   const auto errorText = errorMessage(error);
   vx_velox_error_free(error);
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
@@ -261,7 +263,7 @@ std::optional<column_index_t> sourceChannelFor(
 }
 
 struct VortexScanProjection {
-  std::unique_ptr<vx_expression, decltype(&vx_velox_expression_free)>
+  std::unique_ptr<vx_velox_expression, decltype(&vx_velox_expression_free)>
       expression{nullptr, vx_velox_expression_free};
   bool includesRowIndex{false};
 };
@@ -286,7 +288,7 @@ VortexScanProjection scanProjection(
       included[channel.value()] = true;
     }
   }
-  std::vector<vx_view> fieldNames;
+  std::vector<vx_velox_view> fieldNames;
   fieldNames.reserve(rowType->size());
   for (column_index_t sourceChannel = 0; sourceChannel < rowType->size();
        ++sourceChannel) {
@@ -295,7 +297,7 @@ VortexScanProjection scanProjection(
     }
     const auto& name = rowType->nameOf(sourceChannel);
     scanChannelsBySource[sourceChannel] = fieldNames.size();
-    fieldNames.push_back(vx_view{name.data(), name.size()});
+    fieldNames.push_back(vx_velox_view{name.data(), name.size()});
   }
 
   const bool includeRowIndex = filterRows || fieldNames.empty();
@@ -306,11 +308,11 @@ VortexScanProjection scanProjection(
       }
     }
   }
-  vx_error* error{nullptr};
-  std::unique_ptr<vx_expression, decltype(&vx_velox_expression_free)>
+  vx_velox_error* error{nullptr};
+  std::unique_ptr<vx_velox_expression, decltype(&vx_velox_expression_free)>
       projection{nullptr, vx_velox_expression_free};
   if (includeRowIndex) {
-    const vx_view rowIndexName{
+    const vx_velox_view rowIndexName{
         kVortexRowIndexField.data(), kVortexRowIndexField.size()};
     projection.reset(vx_velox_expression_select_with_row_index(
         fieldNames.empty() ? nullptr : fieldNames.data(),
@@ -685,7 +687,7 @@ void VortexRowReader::startScan() {
       .limit = 0,
       .ordered = true,
   };
-  vx_error* error{nullptr};
+  vx_velox_error* error{nullptr};
   scan_ = vx_velox_data_source_scan(dataSource_, &scanOptions, &error);
   if (scan_ == nullptr) {
     failVortex("create the Vortex scan", error);
@@ -1151,7 +1153,7 @@ std::optional<VortexArray> VortexRowReader::nextVortexBatch() {
   }
   VELOX_CHECK_NOT_NULL(scan_);
   while (true) {
-    vx_error* error{nullptr};
+    vx_velox_error* error{nullptr};
     if (partition_ == nullptr) {
       partition_ = vx_velox_scan_next_partition(scan_, &error);
       if (partition_ == nullptr) {

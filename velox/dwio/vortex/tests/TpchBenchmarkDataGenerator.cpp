@@ -34,6 +34,7 @@
 #include "velox/dwio/vortex/VortexFfi.h"
 #include "velox/tpch/gen/TpchGen.h"
 #include "velox/vector/arrow/Bridge.h"
+#include "vortex_velox_test.h"
 
 DEFINE_string(
     output_path,
@@ -45,39 +46,40 @@ DEFINE_uint64(batch_size, 100'000, "Generator rows per input batch.");
 namespace facebook::velox::dwio::vortex {
 namespace {
 
-std::string errorMessage(const vx_error* error) {
+std::string errorMessage(const vx_velox_error* error) {
   if (error == nullptr) {
     return "Vortex returned an unspecified error";
   }
-  const auto message = vx_error_message(error);
+  const auto message = vx_velox_error_message(error);
   return std::string{message.ptr, message.len};
 }
 
-void checkVortexError(vx_error*& error) {
+void checkVortexError(vx_velox_error*& error) {
   if (error == nullptr) {
     return;
   }
   const auto errorText = errorMessage(error);
-  vx_error_free(error);
+  vx_velox_error_free(error);
   error = nullptr;
   VELOX_FAIL("Vortex write failed: {}", errorText);
 }
 
-struct VortexSinkReleaser {
-  void operator()(vx_array_sink* sink) const {
-    if (sink != nullptr) {
-      vx_array_sink_abort(sink);
+struct VortexWriterReleaser {
+  void operator()(vx_velox_test_writer* writer) const {
+    if (writer != nullptr) {
+      vx_velox_test_writer_abort(writer);
     }
   }
 };
 
 class VortexWriter {
  public:
-  VortexWriter(std::string path, memory::MemoryPool& pool)
-      : path_{std::move(path)},
-        pool_{pool},
-        session_{vx_session_new(), vx_session_free} {
-    VELOX_CHECK_NOT_NULL(session_);
+  VortexWriter(std::string path, memory::MemoryPool& pool) : pool_{pool} {
+    const vx_velox_view pathView{path.data(), path.size()};
+    vx_velox_error* error{nullptr};
+    writer_.reset(vx_velox_test_writer_new(pathView, &error));
+    checkVortexError(error);
+    VELOX_CHECK_NOT_NULL(writer_);
   }
 
   void write(const RowVectorPtr& batch) {
@@ -86,42 +88,22 @@ class VortexWriter {
     exportToArrow(batch, arrowArray, &pool_);
     exportToArrow(batch, arrowSchema);
 
-    vx_error* error{nullptr};
-    std::unique_ptr<const vx_array, decltype(&vx_array_free)> array{
-        vx_array_from_arrow(
-            session_.get(), &arrowArray, &arrowSchema, false, &error),
-        vx_array_free};
-    checkVortexError(error);
-    VELOX_CHECK_NOT_NULL(array);
-
-    if (sink_ == nullptr) {
-      std::unique_ptr<const vx_dtype, decltype(&vx_dtype_free)> dtype{
-          vx_array_dtype(array.get()), vx_dtype_free};
-      VELOX_CHECK_NOT_NULL(dtype);
-      const vx_view pathView{path_.data(), path_.size()};
-      sink_.reset(vx_array_sink_open_file(
-          session_.get(), pathView, dtype.get(), &error));
-      checkVortexError(error);
-      VELOX_CHECK_NOT_NULL(sink_);
-    }
-
-    vx_array_sink_push(sink_.get(), array.get(), &error);
+    vx_velox_error* error{nullptr};
+    vx_velox_test_writer_push(writer_.get(), &arrowArray, &arrowSchema, &error);
     checkVortexError(error);
   }
 
   void close() {
-    vx_error* error{nullptr};
-    auto* sink = sink_.release();
-    VELOX_CHECK_NOT_NULL(sink);
-    vx_array_sink_close(sink, &error);
+    vx_velox_error* error{nullptr};
+    auto* writer = writer_.release();
+    VELOX_CHECK_NOT_NULL(writer);
+    vx_velox_test_writer_close(writer, &error);
     checkVortexError(error);
   }
 
  private:
-  const std::string path_;
   memory::MemoryPool& pool_;
-  std::unique_ptr<vx_session, decltype(&vx_session_free)> session_;
-  std::unique_ptr<vx_array_sink, VortexSinkReleaser> sink_;
+  std::unique_ptr<vx_velox_test_writer, VortexWriterReleaser> writer_;
 };
 
 class DwioWriter {

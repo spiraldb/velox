@@ -24,9 +24,9 @@
 #include "velox/dwio/common/BufferedInput.h"
 #include "velox/type/Type.h"
 
-struct vx_data_source;
-struct vx_expression;
-struct vx_session;
+struct vx_velox_data_source;
+struct vx_velox_expression;
+struct vx_velox_session;
 struct vx_velox_source;
 
 namespace facebook::velox::dwio::vortex {
@@ -57,20 +57,20 @@ class VortexFile {
   const std::vector<std::pair<uint64_t, uint64_t>>& naturalSplits() const;
 
   /// Returns the Vortex session used by this file.
-  const vx_session* session() const;
+  const vx_velox_session* session() const;
 
   /// Creates an owned Vortex data source for a scan.
-  const vx_data_source* createDataSource() const;
+  const vx_velox_data_source* createDataSource() const;
 
   /// Returns safe exclusion decisions for a natural split range.
   std::vector<uint8_t> pruneNaturalSplits(
-      const vx_expression* expression,
+      const vx_velox_expression* expression,
       size_t firstSplit,
       size_t splitCount) const;
 
  private:
   // Owns the Vortex execution session for this file.
-  vx_session* session_{nullptr};
+  vx_velox_session* session_{nullptr};
 
   // Owns the open Vortex source and its callback input.
   vx_velox_source* source_{nullptr};

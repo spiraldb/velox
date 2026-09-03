@@ -29,12 +29,12 @@ namespace facebook::velox::dwio::vortex {
 /// Releases a Vortex expression through the Vortex C API.
 struct VortexExpressionDeleter {
   /// Releases expression when it is not null.
-  void operator()(vx_expression* expression) const;
+  void operator()(vx_velox_expression* expression) const;
 };
 
 /// Owns one Vortex expression.
 using VortexExpressionPtr =
-    std::unique_ptr<vx_expression, VortexExpressionDeleter>;
+    std::unique_ptr<vx_velox_expression, VortexExpressionDeleter>;
 
 /// Describes the exact and residual portions of a ScanSpec filter tree.
 struct VortexFilterConversion {
