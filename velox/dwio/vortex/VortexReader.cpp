@@ -169,15 +169,6 @@ class PushedFilterGuard {
       filters_;
 };
 
-std::vector<VortexRowRange> naturalRowRanges(const VortexFile& file) {
-  std::vector<VortexRowRange> ranges;
-  ranges.reserve(file.naturalSplits().size());
-  for (const auto& [begin, end] : file.naturalSplits()) {
-    ranges.push_back({begin, end});
-  }
-  return ranges;
-}
-
 std::optional<size_t> fixedWidthTypeSize(const TypePtr& type) {
   if (type->isFixedWidth()) {
     return type->cppSizeInBytes();
@@ -241,11 +232,7 @@ VortexRowRange ownedRowRange(
     return {0, file.rowCount()};
   }
   const auto mapped = VortexSplitMapper::map(
-      file.rowCount(),
-      file.fileSize(),
-      naturalRowRanges(file),
-      options.offset(),
-      byteRangeEnd - options.offset());
+      file.naturalSplits(), options.offset(), byteRangeEnd - options.offset());
   return mapped.value_or(VortexRowRange{});
 }
 
@@ -598,7 +585,10 @@ VortexReader::VortexReader(
     std::unique_ptr<common::BufferedInput> input,
     const common::ReaderOptions& options)
     : pool_{&options.memoryPool()},
-      file_{std::make_shared<VortexFile>(std::move(input), *pool_)},
+      file_{std::make_shared<VortexFile>(
+          std::move(input),
+          *pool_,
+          options.cancellationToken())},
       rowType_{logicalFileType(file_->rowType(), options)},
       typeWithId_{common::TypeWithId::create(rowType_)},
       mapRowFieldsByPosition_{
@@ -746,7 +736,7 @@ void VortexRowReader::initializeMetadataPruning() {
   std::optional<size_t> firstOwnedSplit;
   size_t ownedSplitCount{0};
   for (size_t i = 0; i < naturalSplits.size(); ++i) {
-    const auto& [begin, end] = naturalSplits[i];
+    const auto& [begin, end] = naturalSplits[i].rows;
     if (end <= rowRange_.begin || begin >= rowRange_.end) {
       continue;
     }
@@ -762,7 +752,7 @@ void VortexRowReader::initializeMetadataPruning() {
     return;
   }
   for (size_t i = 0; i < ownedSplitCount; ++i) {
-    const auto& [begin, end] = naturalSplits[firstOwnedSplit.value() + i];
+    const auto& [begin, end] = naturalSplits[firstOwnedSplit.value() + i].rows;
     VELOX_CHECK_GT(end, rowRange_.begin);
     VELOX_CHECK_LT(begin, rowRange_.end);
   }
@@ -799,7 +789,7 @@ void VortexRowReader::initializeMetadataPruning() {
   for (size_t relativeSplit = 0; relativeSplit < ownedSplitCount;
        ++relativeSplit) {
     const auto& [begin, end] =
-        naturalSplits[firstOwnedSplit.value() + relativeSplit];
+        naturalSplits[firstOwnedSplit.value() + relativeSplit].rows;
     if (bits::isBitSet(excluded.data(), relativeSplit)) {
       ++skippedStrides_;
       continue;

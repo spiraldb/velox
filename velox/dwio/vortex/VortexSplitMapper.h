@@ -31,17 +31,24 @@ struct VortexRowRange {
   uint64_t end{0};
 };
 
+/// Identifies a natural row range and its external byte-range assignment.
+struct VortexNaturalSplit {
+  /// Specifies the rows in the split.
+  VortexRowRange rows;
+
+  /// Specifies the file byte that assigns the split to an external range.
+  uint64_t assignmentByte{0};
+};
+
 /// Assigns complete Vortex natural row ranges to Velox byte ranges.
 class VortexSplitMapper final {
  public:
   /// Returns the contiguous natural row ranges owned by the half-open byte
   /// range [byteOffset, byteOffset + byteLength). Returns no range when the
   /// byte range owns no natural split. Throws a user error when the natural
-  /// row ranges do not form an exact partition of [0, numFileRows).
+  /// splits are not ordered or contiguous.
   static std::optional<VortexRowRange> map(
-      uint64_t numFileRows,
-      uint64_t fileByteSize,
-      const std::vector<VortexRowRange>& naturalRowRanges,
+      const std::vector<VortexNaturalSplit>& naturalSplits,
       uint64_t byteOffset,
       uint64_t byteLength);
 };

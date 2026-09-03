@@ -87,12 +87,9 @@ TEST_F(VortexE2EFilterTest, metadataPruningStates) {
       std::make_unique<common::BufferedInput>(
           std::make_shared<InMemoryReadFile>(sinkData_),
           readerOptions.memoryPool()),
-      *leafPool_};
-  std::vector<VortexRowRange> naturalSplits;
-  naturalSplits.reserve(file.naturalSplits().size());
-  for (const auto& [begin, end] : file.naturalSplits()) {
-    naturalSplits.push_back({begin, end});
-  }
+      *leafPool_,
+      {}};
+  const auto& naturalSplits = file.naturalSplits();
   ASSERT_GE(naturalSplits.size(), 3);
 
   struct ScanResult {
@@ -138,8 +135,8 @@ TEST_F(VortexE2EFilterTest, metadataPruningStates) {
     return scanResult;
   };
 
-  const auto& first = naturalSplits.front();
-  const auto& last = naturalSplits.back();
+  const auto& first = naturalSplits.front().rows;
+  const auto& last = naturalSplits.back().rows;
   const auto disjointExpression = "(c0 >= " + std::to_string(first.begin) +
       " and c0 < " + std::to_string(first.end) +
       ") or (c0 >= " + std::to_string(last.begin) + " and c0 < " +
@@ -172,13 +169,14 @@ TEST_F(VortexE2EFilterTest, metadataPruningStates) {
 
   const auto byteOffset = file.fileSize() / 2;
   const auto byteLength = file.fileSize() - byteOffset;
-  const auto ownedRange = VortexSplitMapper::map(
-      kRowCount, file.fileSize(), naturalSplits, byteOffset, byteLength);
+  const auto ownedRange =
+      VortexSplitMapper::map(naturalSplits, byteOffset, byteLength);
   ASSERT_TRUE(ownedRange.has_value());
   ASSERT_GT(ownedRange->begin, 0);
   const auto ownedSplitCount = std::count_if(
       naturalSplits.begin(), naturalSplits.end(), [&](const auto& split) {
-        return split.begin >= ownedRange->begin && split.end <= ownedRange->end;
+        return split.rows.begin >= ownedRange->begin &&
+            split.rows.end <= ownedRange->end;
       });
   const auto excluded = scan("c0 < 0", {{byteOffset, byteLength}});
   EXPECT_TRUE(excluded.values.empty());

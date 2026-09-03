@@ -109,9 +109,16 @@ class BufferedInputContext {
  public:
   BufferedInputContext(
       std::unique_ptr<common::BufferedInput> input,
-      memory::MemoryPool& pool)
-      : input_{std::move(input)}, pool_{pool} {
+      memory::MemoryPool& pool,
+      folly::CancellationToken cancellationToken)
+      : input_{std::move(input)},
+        pool_{pool},
+        cancellationToken_{std::move(cancellationToken)} {
     VELOX_CHECK_NOT_NULL(input_);
+  }
+
+  bool isCancelled() const {
+    return cancellationToken_.isCancellationRequested();
   }
 
   int32_t size(uint64_t* sizeOut) noexcept {
@@ -198,6 +205,7 @@ class BufferedInputContext {
  private:
   std::unique_ptr<common::BufferedInput> input_;
   memory::MemoryPool& pool_;
+  folly::CancellationToken cancellationToken_;
   std::mutex mutex_;
 };
 
@@ -249,7 +257,7 @@ void releaseContext(void* context) noexcept {
 int32_t isCancelled(void* context) noexcept {
   try {
     VELOX_CHECK_NOT_NULL(context);
-    return 0;
+    return static_cast<BufferedInputContext*>(context)->isCancelled() ? 1 : 0;
   } catch (const std::exception& error) {
     setReadCallbackError(context, error.what());
     return 1;
@@ -287,7 +295,8 @@ const vx_velox_session* defaultSession() {
 
 VortexFile::VortexFile(
     std::unique_ptr<common::BufferedInput> input,
-    memory::MemoryPool& pool) {
+    memory::MemoryPool& pool,
+    folly::CancellationToken cancellationToken) {
   VELOX_USER_CHECK_EQ(
       vx_velox_abi_version(),
       VX_VELOX_ABI_VERSION,
@@ -317,7 +326,8 @@ VortexFile::VortexFile(
       vx_velox_session_clone(defaultSession()), vx_velox_session_free};
   VELOX_CHECK_NOT_NULL(session);
 
-  auto context = std::make_unique<BufferedInputContext>(std::move(input), pool);
+  auto context = std::make_unique<BufferedInputContext>(
+      std::move(input), pool, std::move(cancellationToken));
   const vx_velox_read_at_callbacks callbacks{
       .struct_size = sizeof(vx_velox_read_at_callbacks),
       .abi_version = VX_VELOX_ABI_VERSION,
@@ -361,7 +371,10 @@ VortexFile::VortexFile(
         0) {
       failVortex("read Vortex split metadata", error);
     }
-    naturalSplits_.emplace_back(split.row_begin, split.row_end);
+    naturalSplits_.push_back({
+        .rows = {split.row_begin, split.row_end},
+        .assignmentByte = split.assignment_byte,
+    });
   }
   session_ = session.release();
   source_ = source.release();
@@ -388,8 +401,7 @@ uint64_t VortexFile::fileSize() const {
   return fileSize_;
 }
 
-const std::vector<std::pair<uint64_t, uint64_t>>& VortexFile::naturalSplits()
-    const {
+const std::vector<VortexNaturalSplit>& VortexFile::naturalSplits() const {
   return naturalSplits_;
 }
 

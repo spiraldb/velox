@@ -167,6 +167,35 @@ TEST_F(VortexReaderTest, fullScan) {
   EXPECT_EQ(pool()->usedBytes(), memoryBeforeRead);
 }
 
+TEST_F(VortexReaderTest, cancellationStopsDeferredReads) {
+  constexpr vector_size_t kRowCount = 2'000'000;
+  const auto file = TempFilePath::create();
+  writeVortex(
+      file->getPath(),
+      makeRowVector({makeFlatVector<int64_t>(kRowCount, [](vector_size_t row) {
+        uint64_t value = row;
+        value += 0x9e3779b97f4a7c15ULL;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+        return static_cast<int64_t>(value ^ (value >> 31));
+      })}));
+
+  folly::CancellationSource cancellationSource;
+  common::ReaderOptions readerOptions{pool()};
+  readerOptions.setCancellationToken(cancellationSource.getToken());
+  auto reader = openReader(file->getPath(), readerOptions);
+  cancellationSource.requestCancellation();
+
+  common::RowReaderOptions rowReaderOptions;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*reader->rowType());
+  rowReaderOptions.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOptions);
+  VectorPtr result;
+  VELOX_ASSERT_THROW(
+      rowReader->next(kRowCount, result), "cancelled the Vortex read");
+}
+
 TEST_F(VortexReaderTest, containsReadCallbackExceptions) {
   const auto bytes = test::writeVortexBytes(
       {makeRowVector({makeFlatVector<int64_t>({1, 2, 3})})}, pool());
@@ -499,21 +528,18 @@ TEST_F(VortexReaderTest, implicitPositionsStartAtOwnedSplit) {
   const auto file = TempFilePath::create();
   writeVortex(file->getPath(), batches);
 
-  std::vector<VortexRowRange> naturalRanges;
+  std::vector<VortexNaturalSplit> naturalSplits;
   uint64_t fileSize{0};
   {
     auto input = std::make_unique<common::BufferedInput>(
         std::make_shared<LocalReadFile>(file->getPath()), *pool());
-    VortexFile metadata{std::move(input), *pool()};
+    VortexFile metadata{std::move(input), *pool(), {}};
     fileSize = metadata.fileSize();
-    for (const auto& [begin, end] : metadata.naturalSplits()) {
-      naturalRanges.push_back({begin, end});
-    }
+    naturalSplits = metadata.naturalSplits();
   }
-  ASSERT_GT(naturalRanges.size(), 1);
+  ASSERT_GT(naturalSplits.size(), 1);
   ASSERT_GT(fileSize, 1);
-  const auto owned = VortexSplitMapper::map(
-      kTotalRows, fileSize, naturalRanges, 1, fileSize - 1);
+  const auto owned = VortexSplitMapper::map(naturalSplits, 1, fileSize - 1);
   ASSERT_TRUE(owned.has_value());
   ASSERT_GT(owned->begin, 0);
 

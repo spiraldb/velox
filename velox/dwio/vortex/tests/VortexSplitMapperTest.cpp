@@ -16,7 +16,6 @@
 
 #include "velox/dwio/vortex/VortexSplitMapper.h"
 
-#include <limits>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -36,65 +35,59 @@ void expectOwnedRange(
   EXPECT_EQ(actual->end, expectedEnd);
 }
 
+VortexNaturalSplit
+split(uint64_t begin, uint64_t end, uint64_t assignmentByte) {
+  return {{begin, end}, assignmentByte};
+}
+
 TEST(VortexSplitMapperTest, exactBoundaries) {
-  const std::vector<VortexRowRange> naturalRowRanges{
-      {0, 2},
-      {2, 5},
-      {5, 10},
+  const std::vector<VortexNaturalSplit> naturalSplits{
+      split(0, 2, 0),
+      split(2, 5, 3),
+      split(5, 10, 7),
   };
 
-  expectOwnedRange(
-      VortexSplitMapper::map(10, 10, naturalRowRanges, 0, 3), 0, 2);
-  expectOwnedRange(
-      VortexSplitMapper::map(10, 10, naturalRowRanges, 3, 4), 2, 5);
-  expectOwnedRange(
-      VortexSplitMapper::map(10, 10, naturalRowRanges, 7, 3), 5, 10);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 0, 3), 0, 2);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 3, 4), 2, 5);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 7, 3), 5, 10);
 }
 
 TEST(VortexSplitMapperTest, emptyOwners) {
-  const std::vector<VortexRowRange> naturalRowRanges{
-      {0, 1},
-      {1, 2},
-      {2, 3},
-      {3, 4},
+  const std::vector<VortexNaturalSplit> naturalSplits{
+      split(0, 1, 0),
+      split(1, 2, 6),
+      split(2, 3, 10),
+      split(3, 4, 14),
   };
 
-  EXPECT_EQ(
-      VortexSplitMapper::map(4, 16, naturalRowRanges, 1, 3), std::nullopt);
-  EXPECT_EQ(
-      VortexSplitMapper::map(4, 16, naturalRowRanges, 4, 0), std::nullopt);
+  EXPECT_EQ(VortexSplitMapper::map(naturalSplits, 1, 3), std::nullopt);
+  EXPECT_EQ(VortexSplitMapper::map(naturalSplits, 4, 0), std::nullopt);
 }
 
 TEST(VortexSplitMapperTest, zeroRowFile) {
-  EXPECT_EQ(VortexSplitMapper::map(0, 0, {}, 0, 1), std::nullopt);
-  EXPECT_EQ(
-      VortexSplitMapper::map(0, std::numeric_limits<uint64_t>::max(), {}, 0, 1),
-      std::nullopt);
+  EXPECT_EQ(VortexSplitMapper::map({}, 0, 1), std::nullopt);
 }
 
 TEST(VortexSplitMapperTest, oneNaturalSplit) {
-  const std::vector<VortexRowRange> naturalRowRanges{{0, 100}};
+  const std::vector<VortexNaturalSplit> naturalSplits{split(0, 100, 0)};
 
-  expectOwnedRange(
-      VortexSplitMapper::map(100, 1'000, naturalRowRanges, 0, 1), 0, 100);
-  EXPECT_EQ(
-      VortexSplitMapper::map(100, 1'000, naturalRowRanges, 1, 999),
-      std::nullopt);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 0, 1), 0, 100);
+  EXPECT_EQ(VortexSplitMapper::map(naturalSplits, 1, 999), std::nullopt);
 }
 
 TEST(VortexSplitMapperTest, adjacentByteTokensTileRows) {
-  const std::vector<VortexRowRange> naturalRowRanges{
-      {0, 1},
-      {1, 4},
-      {4, 10},
-      {10, 13},
+  const std::vector<VortexNaturalSplit> naturalSplits{
+      split(0, 1, 0),
+      split(1, 4, 3),
+      split(4, 10, 8),
+      split(10, 13, 14),
   };
 
   const std::vector<std::optional<VortexRowRange>> ownedRowRanges{
-      VortexSplitMapper::map(13, 16, naturalRowRanges, 0, 4),
-      VortexSplitMapper::map(13, 16, naturalRowRanges, 4, 4),
-      VortexSplitMapper::map(13, 16, naturalRowRanges, 8, 4),
-      VortexSplitMapper::map(13, 16, naturalRowRanges, 12, 4),
+      VortexSplitMapper::map(naturalSplits, 0, 4),
+      VortexSplitMapper::map(naturalSplits, 4, 4),
+      VortexSplitMapper::map(naturalSplits, 8, 4),
+      VortexSplitMapper::map(naturalSplits, 12, 4),
   };
 
   expectOwnedRange(ownedRowRanges[0], 0, 4);
@@ -114,38 +107,38 @@ TEST(VortexSplitMapperTest, adjacentByteTokensTileRows) {
 }
 
 TEST(VortexSplitMapperTest, collidingAssignmentBytesRemainTogether) {
-  const std::vector<VortexRowRange> naturalRowRanges{
-      {0, 1},
-      {1, 2},
-      {2, 3},
-      {3, 4},
+  const std::vector<VortexNaturalSplit> naturalSplits{
+      split(0, 1, 0),
+      split(1, 2, 0),
+      split(2, 3, 1),
+      split(3, 4, 1),
   };
 
-  expectOwnedRange(VortexSplitMapper::map(4, 2, naturalRowRanges, 0, 1), 0, 2);
-  expectOwnedRange(VortexSplitMapper::map(4, 2, naturalRowRanges, 1, 1), 2, 4);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 0, 1), 0, 2);
+  expectOwnedRange(VortexSplitMapper::map(naturalSplits, 1, 1), 2, 4);
 }
 
 TEST(VortexSplitMapperTest, invalidNaturalRanges) {
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {}, 0, 16), "must have natural row ranges");
-  VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {{1, 4}}, 0, 16),
+      VortexSplitMapper::map({split(1, 4, 0)}, 0, 16),
       "must be ordered and contiguous");
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {{0, 1}, {2, 4}}, 0, 16),
+      VortexSplitMapper::map({split(0, 1, 0), split(2, 4, 8)}, 0, 16),
       "must be ordered and contiguous");
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {{0, 3}, {2, 4}}, 0, 16),
+      VortexSplitMapper::map({split(0, 3, 0), split(2, 4, 8)}, 0, 16),
       "must be ordered and contiguous");
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {{0, 2}, {2, 2}, {2, 4}}, 0, 16),
+      VortexSplitMapper::map(
+          {split(0, 2, 0), split(2, 2, 8), split(2, 4, 12)}, 0, 16),
       "must be non-empty");
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(4, 16, {{0, 3}}, 0, 16),
-      "must cover the file row count");
+      VortexSplitMapper::map({split(0, 2, 4)}, 0, 16),
+      "first natural split assignment must be byte zero");
   VELOX_ASSERT_THROW(
-      VortexSplitMapper::map(0, 0, {{0, 1}}, 0, 1),
-      "must be empty for a zero-row Vortex file");
+      VortexSplitMapper::map(
+          {split(0, 2, 0), split(2, 4, 8), split(4, 6, 7)}, 0, 16),
+      "assignment bytes must be ordered");
 }
 
 } // namespace

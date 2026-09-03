@@ -21,7 +21,10 @@
 #include <utility>
 #include <vector>
 
+#include <folly/CancellationToken.h>
+
 #include "velox/dwio/common/BufferedInput.h"
+#include "velox/dwio/vortex/VortexSplitMapper.h"
 #include "velox/type/Type.h"
 
 struct vx_velox_data_source;
@@ -37,7 +40,8 @@ class VortexFile {
   /// Opens a Vortex file through the supplied buffered input.
   VortexFile(
       std::unique_ptr<common::BufferedInput> input,
-      memory::MemoryPool& pool);
+      memory::MemoryPool& pool,
+      folly::CancellationToken cancellationToken);
 
   ~VortexFile();
 
@@ -54,7 +58,7 @@ class VortexFile {
   uint64_t fileSize() const;
 
   /// Returns the natural row ranges reported by Vortex.
-  const std::vector<std::pair<uint64_t, uint64_t>>& naturalSplits() const;
+  const std::vector<VortexNaturalSplit>& naturalSplits() const;
 
   /// Returns the Vortex session used by this file.
   const vx_velox_session* session() const;
@@ -85,7 +89,7 @@ class VortexFile {
   uint64_t fileSize_{0};
 
   // Stores the natural row ranges from the Vortex layout.
-  std::vector<std::pair<uint64_t, uint64_t>> naturalSplits_;
+  std::vector<VortexNaturalSplit> naturalSplits_;
 };
 
 } // namespace facebook::velox::dwio::vortex

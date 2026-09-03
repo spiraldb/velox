@@ -133,7 +133,8 @@ TEST_F(VortexTableScanTest, hiveScanWithFiltersAndMultipleSplits) {
   VortexFile vortexFile{
       std::make_unique<common::BufferedInput>(
           std::make_shared<LocalReadFile>(file->getPath()), *pool()),
-      *pool()};
+      *pool(),
+      {}};
   ASSERT_GT(vortexFile.naturalSplits().size(), 1);
 
   auto plan = PlanBuilder(pool())

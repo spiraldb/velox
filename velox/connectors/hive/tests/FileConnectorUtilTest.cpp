@@ -48,7 +48,8 @@ class FileConnectorUtilTest : public exec::test::HiveConnectorTestBase {
   };
 
   QueryCtxHolder makeConnectorQueryCtx(
-      std::unordered_map<std::string, std::string> sessionProps = {}) {
+      std::unordered_map<std::string, std::string> sessionProps = {},
+      folly::CancellationToken cancellationToken = {}) {
     QueryCtxHolder holder;
     holder.sessionProperties =
         std::make_shared<config::ConfigBase>(std::move(sessionProps));
@@ -64,7 +65,9 @@ class FileConnectorUtilTest : public exec::test::HiveConnectorTestBase {
         "task.FileConnectorUtilTest",
         "planNodeId.FileConnectorUtilTest",
         0,
-        "");
+        "",
+        false,
+        std::move(cancellationToken));
     return holder;
   }
 
@@ -234,6 +237,24 @@ TEST_F(FileConnectorUtilTest, configureReaderOptions) {
             readerOptions),
         "received splits of different formats");
   }
+}
+
+TEST_F(FileConnectorUtilTest, configureReaderOptionsPropagatesCancellation) {
+  folly::CancellationSource cancellationSource;
+  auto holder = makeConnectorQueryCtx({}, cancellationSource.getToken());
+  auto split = makeSplit();
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  hive::configureReaderOptions(
+      makeFileConfig(),
+      holder.ctx.get(),
+      /*fileSchema=*/nullptr,
+      split,
+      /*tableParameters=*/{},
+      readerOptions);
+
+  EXPECT_FALSE(readerOptions.cancellationToken().isCancellationRequested());
+  cancellationSource.requestCancellation();
+  EXPECT_TRUE(readerOptions.cancellationToken().isCancellationRequested());
 }
 
 TEST_F(FileConnectorUtilTest, cacheMetadataRequiresCacheableSplit) {

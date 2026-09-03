@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <folly/CancellationToken.h>
 #include <folly/Executor.h>
 
 #include "velox/common/base/Exceptions.h"
@@ -181,6 +182,16 @@ class ReaderOptions {
     ioExecutor_ = std::move(ioExecutor);
   }
 
+  /// Sets the token that reports cancellation of the current read operation.
+  void setCancellationToken(folly::CancellationToken cancellationToken) {
+    cancellationToken_ = std::move(cancellationToken);
+  }
+
+  /// Returns the token that reports cancellation of the current read operation.
+  const folly::CancellationToken& cancellationToken() const {
+    return cancellationToken_;
+  }
+
   /// IO statistics for tracking storage reads, SSD reads, RAM cache hits,
   /// and overread bytes for data stream IO.
   const std::shared_ptr<IoStatistics>& dataIoStats() const {
@@ -204,6 +215,7 @@ class ReaderOptions {
   std::shared_ptr<IoStatistics> indexIoStats_;
 
   std::shared_ptr<folly::Executor> ioExecutor_;
+  folly::CancellationToken cancellationToken_;
 
   uint64_t autoPreloadLength_{DEFAULT_AUTO_PRELOAD_SIZE};
   PrefetchMode prefetchMode_{PrefetchMode::PREFETCH};

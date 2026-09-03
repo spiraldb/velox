@@ -26,21 +26,20 @@ namespace facebook::velox::dwio::vortex {
 namespace {
 
 void validateNaturalRowRanges(
-    uint64_t numFileRows,
-    const std::vector<VortexRowRange>& naturalRowRanges) {
-  if (numFileRows == 0) {
-    VELOX_USER_CHECK(
-        naturalRowRanges.empty(),
-        "Natural row ranges must be empty for a zero-row Vortex file.");
+    const std::vector<VortexNaturalSplit>& naturalSplits) {
+  if (naturalSplits.empty()) {
     return;
   }
-
-  VELOX_USER_CHECK(
-      !naturalRowRanges.empty(),
-      "A non-empty Vortex file must have natural row ranges.");
+  VELOX_USER_CHECK_EQ(
+      naturalSplits.front().assignmentByte,
+      0,
+      "The first natural split assignment must be byte zero: {}",
+      naturalSplits.front().assignmentByte);
 
   uint64_t expectedBegin{0};
-  for (const auto& naturalRowRange : naturalRowRanges) {
+  uint64_t previousAssignmentByte{0};
+  for (const auto& naturalSplit : naturalSplits) {
+    const auto& naturalRowRange = naturalSplit.rows;
     VELOX_USER_CHECK_LT(
         naturalRowRange.begin,
         naturalRowRange.end,
@@ -53,49 +52,25 @@ void validateNaturalRowRanges(
         "Natural row ranges must be ordered and contiguous: {}, {}",
         naturalRowRange.begin,
         expectedBegin);
-    VELOX_USER_CHECK_LE(
-        naturalRowRange.end,
-        numFileRows,
-        "Natural row range exceeds the file row count: {}, {}",
-        naturalRowRange.end,
-        numFileRows);
+    VELOX_USER_CHECK_GE(
+        naturalSplit.assignmentByte,
+        previousAssignmentByte,
+        "Natural split assignment bytes must be ordered: {}, {}",
+        naturalSplit.assignmentByte,
+        previousAssignmentByte);
     expectedBegin = naturalRowRange.end;
+    previousAssignmentByte = naturalSplit.assignmentByte;
   }
-
-  VELOX_USER_CHECK_EQ(
-      expectedBegin,
-      numFileRows,
-      "Natural row ranges must cover the file row count: {}, {}",
-      expectedBegin,
-      numFileRows);
-}
-
-uint64_t splitAssignmentByte(
-    size_t naturalRowRangeIndex,
-    const VortexRowRange& naturalRowRange,
-    uint64_t numFileRows,
-    uint64_t fileByteSize) {
-  if (naturalRowRangeIndex == 0) {
-    return 0;
-  }
-
-  const auto midpointRow =
-      naturalRowRange.begin + (naturalRowRange.end - naturalRowRange.begin) / 2;
-  const auto midpointByte =
-      (static_cast<__uint128_t>(midpointRow) * fileByteSize) / numFileRows;
-  return static_cast<uint64_t>(midpointByte);
 }
 
 } // namespace
 
 std::optional<VortexRowRange> VortexSplitMapper::map(
-    uint64_t numFileRows,
-    uint64_t fileByteSize,
-    const std::vector<VortexRowRange>& naturalRowRanges,
+    const std::vector<VortexNaturalSplit>& naturalSplits,
     uint64_t byteOffset,
     uint64_t byteLength) {
-  validateNaturalRowRanges(numFileRows, naturalRowRanges);
-  if (numFileRows == 0 || byteLength == 0) {
+  validateNaturalRowRanges(naturalSplits);
+  if (naturalSplits.empty() || byteLength == 0) {
     return std::nullopt;
   }
 
@@ -107,28 +82,31 @@ std::optional<VortexRowRange> VortexSplitMapper::map(
       byteLength);
   const auto byteRangeEnd = byteOffset + byteLength;
 
-  std::vector<uint64_t> assignmentBytes;
-  assignmentBytes.reserve(naturalRowRanges.size());
-  for (size_t i = 0; i < naturalRowRanges.size(); ++i) {
-    assignmentBytes.push_back(
-        splitAssignmentByte(i, naturalRowRanges[i], numFileRows, fileByteSize));
-  }
-
   const auto firstOwnedAssignment = std::lower_bound(
-      assignmentBytes.begin(), assignmentBytes.end(), byteOffset);
+      naturalSplits.begin(),
+      naturalSplits.end(),
+      byteOffset,
+      [](const VortexNaturalSplit& split, uint64_t offset) {
+        return split.assignmentByte < offset;
+      });
   const auto afterLastOwnedAssignment = std::lower_bound(
-      assignmentBytes.begin(), assignmentBytes.end(), byteRangeEnd);
+      naturalSplits.begin(),
+      naturalSplits.end(),
+      byteRangeEnd,
+      [](const VortexNaturalSplit& split, uint64_t offset) {
+        return split.assignmentByte < offset;
+      });
   if (firstOwnedAssignment == afterLastOwnedAssignment) {
     return std::nullopt;
   }
 
   const auto firstOwnedRowRangeIndex =
-      static_cast<size_t>(firstOwnedAssignment - assignmentBytes.begin());
+      static_cast<size_t>(firstOwnedAssignment - naturalSplits.begin());
   const auto afterLastOwnedRowRangeIndex =
-      static_cast<size_t>(afterLastOwnedAssignment - assignmentBytes.begin());
+      static_cast<size_t>(afterLastOwnedAssignment - naturalSplits.begin());
   return VortexRowRange{
-      naturalRowRanges[firstOwnedRowRangeIndex].begin,
-      naturalRowRanges[afterLastOwnedRowRangeIndex - 1].end,
+      naturalSplits[firstOwnedRowRangeIndex].rows.begin,
+      naturalSplits[afterLastOwnedRowRangeIndex - 1].rows.end,
   };
 }
 
