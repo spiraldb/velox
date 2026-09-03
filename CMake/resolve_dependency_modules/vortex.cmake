@@ -16,14 +16,14 @@ include_guard(GLOBAL)
 
 set(
   VELOX_VORTEX_BUILD_VERSION
-  "1b34b18895f95fa5deaaef5e10d90415c27adf86"
+  "1a8ab432c1e0b09ed135e7a1b957fc459b3076af"
   CACHE STRING
   "Vortex tag or commit for the bundled source archive."
 )
 set(VELOX_VORTEX_SOURCE_URL "" CACHE STRING "URL for the pinned Vortex source archive.")
 set(
   VELOX_VORTEX_BUILD_SHA256_CHECKSUM
-  "75fce40970bee64882945e8904f94d82411c2c3f936be97d0d53e6faa3da3251"
+  "36624a7503f81af11575e16a990beeb196d2b3e4b899d117361e745d94aad2b4"
   CACHE STRING
   "SHA-256 checksum for the pinned Vortex source archive."
 )

@@ -25,8 +25,8 @@ For local development, set ``VELOX_VORTEX_SOURCE_DIR`` to a Vortex checkout:
       -S . -B _build
     cmake --build _build --target velox_dwio_vortex_reader
 
-The checkout must contain ``vortex-velox`` and ``vortex-ffi``. Cargo uses the
-Rust toolchain from the Vortex ``rust-toolchain.toml`` file.
+The checkout must contain ``vortex-velox``. Cargo uses the Rust toolchain from
+the Vortex ``rust-toolchain.toml`` file.
 
 A bundled build accepts these cache variables:
 
@@ -36,6 +36,18 @@ A bundled build accepts these cache variables:
 
 The release configuration must define a source URL and a SHA-256 checksum.
 Velox uses ``cargo build --locked`` for the ``vortex-velox`` package.
+
+Set ``Vortex_SOURCE=SYSTEM`` to use an installed adapter. The installation
+must provide ``vortex_velox.h`` and the ``vortex_velox`` static library.
+
+Run the build-mode test against a local Vortex checkout:
+
+.. code-block:: bash
+
+    scripts/tests/test_VortexBuildModes.sh /path/to/vortex
+
+The test builds and runs a small ABI program in local, installed, and pinned
+source modes.
 
 Reader registration
 ===================

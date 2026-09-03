@@ -15,8 +15,13 @@
 
 include(CMakeFindDependencyMacro)
 
-if("@VELOX_ENABLE_VORTEX@")
-  if(NOT TARGET Vortex::vortex_velox)
+if("@VELOX_ENABLE_VORTEX@" AND NOT TARGET Vortex::vortex_velox)
+  if("@Vortex_SOURCE@" STREQUAL "SYSTEM")
+    block()
+      list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+      find_dependency(Vortex)
+    endblock()
+  else()
     if(WIN32)
       set(_vortex_library_name "vortex_velox.lib")
     else()

@@ -318,9 +318,11 @@ endif()
 
 if(VELOX_ENABLE_VORTEX)
   if(NOT TARGET Vortex::vortex_velox)
-    # Vortex publishes the adapter as source. Local and pinned builds use the
-    # same Cargo path.
-    set(Vortex_SOURCE BUNDLED)
+    if(VELOX_VORTEX_SOURCE_DIR)
+      set(Vortex_SOURCE BUNDLED)
+    else()
+      velox_set_source(Vortex)
+    endif()
     velox_resolve_dependency(Vortex)
   endif()
 endif()
