@@ -17,6 +17,7 @@
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include "velox/common/memory/Memory.h"
@@ -55,6 +56,39 @@ constexpr vector_size_t kNumBatches{64};
 constexpr vector_size_t kNumRows{kRowsPerBatch * kNumBatches};
 constexpr vector_size_t kFilteredRows{41'944};
 constexpr vector_size_t kSparseFilterRows{83'887};
+
+constexpr vector_size_t filteredRows(vector_size_t percent) {
+  return (kNumRows / 100) * percent + std::min(kNumRows % 100, percent);
+}
+
+constexpr int64_t measureValue(uint64_t row) {
+  return static_cast<int64_t>(
+      (row * 6'364'136'223'846'793'005ULL + 1'442'695'040'888'963'407ULL) &
+      0xFF'FFFF'FFFFULL);
+}
+
+vector_size_t randomFilteredRows(vector_size_t percent) {
+  vector_size_t count{0};
+  for (vector_size_t row = 0; row < kNumRows; ++row) {
+    count += measureValue(row) % 100 < percent;
+  }
+  return count;
+}
+
+vector_size_t clusteredFilteredRows(vector_size_t percent) {
+  const auto threshold = 1'024 * percent / 100;
+  vector_size_t count{0};
+  for (vector_size_t row = 0; row < kNumRows; ++row) {
+    count += row % 1'024 < threshold;
+  }
+  return count;
+}
+
+struct LazyFilterWorkload {
+  std::string name;
+  vector_size_t expectedRows;
+  core::PlanNodePtr plan;
+};
 
 class VortexFormatScanBenchmark : public HiveConnectorTestBase {
  public:
@@ -106,6 +140,45 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
                           "",
                           inputType_)
                       .planNode();
+    for (const auto percent : {1, 25, 50, 75}) {
+      lazyFilterWorkloads_.push_back(
+          {fmt::format("lazy_filter_periodic_{}pct", percent),
+           filteredRows(percent),
+           PlanBuilder(pool())
+               .tableScan(
+                   ROW({"filter_key", "payload"}, {BIGINT(), BIGINT()}),
+                   {},
+                   "",
+                   inputType_)
+               .filter(fmt::format("filter_key < {}", percent))
+               .project({"payload"})
+               .planNode()});
+      lazyFilterWorkloads_.push_back(
+          {fmt::format("lazy_filter_random_{}pct", percent),
+           randomFilteredRows(percent),
+           PlanBuilder(pool())
+               .tableScan(
+                   ROW({"measure", "payload"}, {BIGINT(), BIGINT()}),
+                   {},
+                   "",
+                   inputType_)
+               .filter(fmt::format("measure % 100 < {}", percent))
+               .project({"payload"})
+               .planNode()});
+      const auto clusteredThreshold = 1'024 * percent / 100;
+      lazyFilterWorkloads_.push_back(
+          {fmt::format("lazy_filter_clustered_{}pct", percent),
+           clusteredFilteredRows(percent),
+           PlanBuilder(pool())
+               .tableScan(
+                   ROW({"group_key", "payload"}, {BIGINT(), BIGINT()}),
+                   {},
+                   "",
+                   inputType_)
+               .filter(fmt::format("group_key < {}", clusteredThreshold))
+               .project({"payload"})
+               .planNode()});
+    }
     aggregationPlan_ = PlanBuilder(pool())
                            .tableScan(
                                ROW({"filter_key", "group_key", "measure"},
@@ -132,6 +205,7 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
     parquet::unregisterParquetReaderFactory();
     parquet::unregisterParquetWriterFactory();
     aggregationPlan_.reset();
+    lazyFilterWorkloads_.clear();
     filterPlan_.reset();
     projectionPlan_.reset();
     fullScanPlan_.reset();
@@ -149,6 +223,9 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
     addFormatBenchmarks("full_scan", fullScanPlan_);
     addFormatBenchmarks("project_1_of_4", projectionPlan_);
     addFormatBenchmarks("filter_1pct", filterPlan_);
+    for (const auto& workload : lazyFilterWorkloads_) {
+      addFormatBenchmarks(workload.name, workload.plan);
+    }
     addFormatBenchmarks("sparse_grouped_sum_hook", aggregationPlan_);
   }
 
@@ -175,11 +252,7 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
               makeFlatVector<int64_t>(
                   kRowsPerBatch,
                   [batchOffset](vector_size_t row) {
-                    const auto value = batchOffset + row;
-                    return static_cast<int64_t>(
-                        (value * 6'364'136'223'846'793'005ULL +
-                         1'442'695'040'888'963'407ULL) &
-                        0xFF'FFFF'FFFFULL);
+                    return measureValue(batchOffset + row);
                   }),
               makeFlatVector<int64_t>(
                   kRowsPerBatch,
@@ -332,6 +405,10 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
       VELOX_CHECK_EQ(run(fullScanPlan_, benchmarkFormat.format), kNumRows);
       VELOX_CHECK_EQ(run(projectionPlan_, benchmarkFormat.format), kNumRows);
       VELOX_CHECK_EQ(run(filterPlan_, benchmarkFormat.format), kFilteredRows);
+      for (const auto& workload : lazyFilterWorkloads_) {
+        VELOX_CHECK_EQ(
+            run(workload.plan, benchmarkFormat.format), workload.expectedRows);
+      }
     }
 
     for (const auto& plan : {fullScanPlan_, projectionPlan_, filterPlan_}) {
@@ -339,6 +416,16 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
       for (const auto& benchmarkFormat : formats) {
         VELOX_CHECK(
             reference == scanDigest(plan, benchmarkFormat.format),
+            "Parquet and {} produced different materialized values",
+            benchmarkFormat.name);
+      }
+    }
+    for (const auto& workload : lazyFilterWorkloads_) {
+      const auto reference =
+          scanDigest(workload.plan, common::FileFormat::PARQUET);
+      for (const auto& benchmarkFormat : formats) {
+        VELOX_CHECK(
+            reference == scanDigest(workload.plan, benchmarkFormat.format),
             "Parquet and {} produced different materialized values",
             benchmarkFormat.name);
       }
@@ -385,6 +472,7 @@ class VortexFormatScanBenchmark : public HiveConnectorTestBase {
   core::PlanNodePtr fullScanPlan_;
   core::PlanNodePtr projectionPlan_;
   core::PlanNodePtr filterPlan_;
+  std::vector<LazyFilterWorkload> lazyFilterWorkloads_;
   core::PlanNodePtr aggregationPlan_;
 };
 

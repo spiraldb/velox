@@ -1546,18 +1546,14 @@ TEST_F(VortexReaderTest, sparseLazyLoadCanonicalizesOnlySelectedRows) {
   common::RowReaderOptions options;
   auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
   scanSpec->addAllChildFields(*input->type());
-  scanSpec->childByName("c0")->setFilter(
-      facebook::velox::common::createBigintValues({1, 3, 4}, false));
-  scanSpec->childByName("c0")->setProjectOut(false);
-  scanSpec->childByName("c1")->setChannel(0);
   options.setScanSpec(scanSpec);
   auto rowReader = reader->createRowReader(options);
 
   VectorPtr result;
   EXPECT_EQ(rowReader->next(input->size(), result), input->size());
-  auto* lazy = result->as<RowVector>()->childAt(0)->asChecked<LazyVector>();
+  auto* lazy = result->as<RowVector>()->childAt(1)->asChecked<LazyVector>();
   ASSERT_FALSE(lazy->isLoaded());
-  std::vector<vector_size_t> rows{0, 2};
+  std::vector<vector_size_t> rows{1, 4};
   const auto statsBefore = pool()->stats();
   lazy->load(rows, nullptr);
   const auto statsAfter = pool()->stats();
@@ -1569,9 +1565,61 @@ TEST_F(VortexReaderTest, sparseLazyLoadCanonicalizesOnlySelectedRows) {
   auto expected = makeNullableFlatVector<int64_t>({
       std::nullopt,
       std::nullopt,
+      std::nullopt,
+      std::nullopt,
       50,
   });
   test::assertEqualVectors(expected, lazy->loadedVectorShared());
+}
+
+TEST_F(VortexReaderTest, denseLazyLoadExportsWindowAndSelectsRows) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5}),
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30, 40, 50, 60}),
+  });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), input);
+
+  const auto statsBefore = pool()->stats();
+  const auto usedBytesBefore = pool()->usedBytes();
+  VectorPtr retained;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*input->type());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    std::vector<uint64_t> deleted(bits::nwords(input->size()), 0);
+    bits::setBit(deleted.data(), 2);
+    bits::setBit(deleted.data(), 3);
+    bits::setBit(deleted.data(), 5);
+    const common::Mutation mutation{.deletedRows = deleted.data()};
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(input->size(), result, &mutation), input->size());
+    auto* lazy = result->as<RowVector>()->childAt(1)->asChecked<LazyVector>();
+    std::vector<vector_size_t> rows{0, 1, 2};
+    lazy->load(rows, nullptr);
+    retained = lazy->loadedVectorShared();
+  }
+
+  ASSERT_EQ(retained->encoding(), VectorEncoding::Simple::DICTIONARY);
+  EXPECT_EQ(retained->valueVector()->size(), input->size());
+  {
+    DecodedVector decoded{*retained};
+    EXPECT_EQ(decoded.valueAt<int64_t>(0), 10);
+    EXPECT_TRUE(decoded.isNullAt(1));
+    EXPECT_EQ(decoded.valueAt<int64_t>(2), 50);
+  }
+  EXPECT_EQ(
+      pool()->stats().cumulativeExternalBytes -
+          statsBefore.cumulativeExternalBytes,
+      2 * (6 * sizeof(int64_t) + sizeof(uint64_t)));
+
+  retained.reset();
+  EXPECT_EQ(pool()->stats().numExternalFrees - statsBefore.numExternalFrees, 2);
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBefore);
 }
 
 } // namespace

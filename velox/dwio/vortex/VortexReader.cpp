@@ -346,6 +346,23 @@ void scatterLazyRows(RowSet rows, vector_size_t resultSize, VectorPtr& result) {
       nullptr, std::move(indices), resultSize, std::move(result));
 }
 
+void selectAndScatterLazyRows(
+    RowSet rows,
+    RowSet sourceRows,
+    vector_size_t resultSize,
+    VectorPtr& result) {
+  VELOX_CHECK_EQ(rows.size(), sourceRows.size());
+  auto indices =
+      AlignedBuffer::allocate<vector_size_t>(resultSize, result->pool(), 0);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  for (vector_size_t index = 0; index < rows.size(); ++index) {
+    rawIndices[rows[index]] = sourceRows[index];
+  }
+  result->disableMemo();
+  result = BaseVector::wrapInDictionary(
+      nullptr, std::move(indices), resultSize, std::move(result));
+}
+
 bool isIdentityRows(RowSet rows, size_t length) {
   if (rows.data() == nullptr) {
     return true;
@@ -359,6 +376,14 @@ bool isIdentityRows(RowSet rows, size_t length) {
     }
   }
   return true;
+}
+
+bool shouldExportFullWindow(
+    RowSet rows,
+    size_t length,
+    const TypePtr& sourceType) {
+  // Row density bounds retained bytes only for fixed-width values.
+  return sourceType->isFixedWidth() && rows.size() >= length / 2 + length % 2;
 }
 
 VectorPtr preserveParentNullsForFiltering(
@@ -519,11 +544,20 @@ class VortexLazyLoader final : public VectorLoader {
     }
 
     VectorPtr loaded;
+    bool selectedFromFullWindow{false};
+    const bool identityRows =
+        exporter_ != nullptr && isIdentityRows(effectiveRows, exportLength_);
     if (exporter_ == nullptr) {
       VELOX_CHECK(field_.has_value());
       loaded = importVortexVector(
           file_->session(), field_.value(), sourceType_, effectiveRows, pool_);
-    } else if (!isIdentityRows(effectiveRows, exportLength_)) {
+    } else if (
+        !identityRows &&
+        shouldExportFullWindow(effectiveRows, exportLength_, sourceType_)) {
+      loaded = exporter_->import(
+          exportOffset_, exportLength_, sourceType_, {}, pool_);
+      selectedFromFullWindow = true;
+    } else if (!identityRows) {
       VELOX_CHECK(field_.has_value());
       auto field = field_->slice(exportOffset_, exportOffset_ + exportLength_);
       loaded = importVortexVector(
@@ -536,7 +570,11 @@ class VortexLazyLoader final : public VectorLoader {
         adaptVortexVectorType(loaded, targetType_, mapRowFieldsByPosition_);
     loaded = applyNestedConstants(
         std::move(loaded), rootScanSpec_->childByName(fieldName_));
-    scatterLazyRows(rows, resultSize, loaded);
+    if (selectedFromFullWindow) {
+      selectAndScatterLazyRows(rows, effectiveRows, resultSize, loaded);
+    } else {
+      scatterLazyRows(rows, resultSize, loaded);
+    }
     *result = std::move(loaded);
   }
 
