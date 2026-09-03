@@ -273,6 +273,13 @@ std::string errorMessage(const vx_error* error) {
   VELOX_USER_FAIL("Failed to {}: {}", operation, errorText);
 }
 
+const vx_session* defaultSession() {
+  static const std::unique_ptr<vx_session, decltype(&vx_velox_session_free)>
+      session{vx_velox_session_new(), vx_velox_session_free};
+  VELOX_CHECK_NOT_NULL(session);
+  return session.get();
+}
+
 } // namespace
 
 VortexFile::VortexFile(
@@ -289,7 +296,14 @@ VortexFile::VortexFile(
       VX_VELOX_CAPABILITY_ARRAY_ARROW_EXPORT |
       VX_VELOX_CAPABILITY_ROW_INDEX_PROJECTION |
       VX_VELOX_CAPABILITY_NATURAL_SPLIT_PRUNING |
-      VX_VELOX_CAPABILITY_READ_CANCELLATION;
+      VX_VELOX_CAPABILITY_READ_CANCELLATION |
+      VX_VELOX_CAPABILITY_EXPORT_CURSOR | VX_VELOX_CAPABILITY_PLAIN_PROJECTION |
+      VX_VELOX_CAPABILITY_VARBIN_VISITOR |
+      VX_VELOX_CAPABILITY_DICTIONARY_VISITOR |
+      VX_VELOX_CAPABILITY_CONSTANT_VISITOR | VX_VELOX_CAPABILITY_BOOL_VISITOR |
+      VX_VELOX_CAPABILITY_DATE_VISITOR | VX_VELOX_CAPABILITY_DECIMAL_VISITOR |
+      VX_VELOX_CAPABILITY_STRUCT_VISITOR | VX_VELOX_CAPABILITY_LIST_VISITOR |
+      VX_VELOX_CAPABILITY_MAP_VISITOR;
   VELOX_USER_CHECK_EQ(
       vx_velox_capabilities() & kRequiredCapabilities,
       kRequiredCapabilities,
@@ -297,7 +311,7 @@ VortexFile::VortexFile(
       kRequiredCapabilities & ~vx_velox_capabilities());
 
   std::unique_ptr<vx_session, decltype(&vx_velox_session_free)> session{
-      vx_velox_session_new(), vx_velox_session_free};
+      vx_velox_session_clone(defaultSession()), vx_velox_session_free};
   VELOX_CHECK_NOT_NULL(session);
 
   auto context = std::make_unique<BufferedInputContext>(std::move(input), pool);

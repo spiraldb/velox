@@ -21,6 +21,7 @@
 
 #include "velox/common/memory/MemoryPool.h"
 #include "velox/vector/ComplexVector.h"
+#include "velox/vector/arrow/Bridge.h"
 
 namespace facebook::velox::test {
 
@@ -28,7 +29,8 @@ namespace facebook::velox::test {
 void writeVortexFile(
     const std::string& path,
     const std::vector<RowVectorPtr>& batches,
-    memory::MemoryPool* pool);
+    memory::MemoryPool* pool,
+    const ArrowOptions& arrowOptions = ArrowOptions{});
 
 /// Writes row-vector batches and returns the Vortex file bytes.
 std::string writeVortexBytes(

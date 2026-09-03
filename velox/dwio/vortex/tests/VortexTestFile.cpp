@@ -58,7 +58,8 @@ struct SinkReleaser {
 void writeVortexFile(
     const std::string& path,
     const std::vector<RowVectorPtr>& batches,
-    memory::MemoryPool* pool) {
+    memory::MemoryPool* pool,
+    const ArrowOptions& arrowOptions) {
   VELOX_CHECK_NOT_NULL(pool);
   VELOX_CHECK(!batches.empty());
   std::unique_ptr<vx_session, decltype(&vx_session_free)> session{
@@ -71,8 +72,8 @@ void writeVortexFile(
   for (const auto& batch : batches) {
     ArrowArray arrowArray{};
     ArrowSchema arrowSchema{};
-    exportToArrow(batch, arrowArray, pool);
-    exportToArrow(batch, arrowSchema);
+    exportToArrow(batch, arrowArray, pool, arrowOptions);
+    exportToArrow(batch, arrowSchema, arrowOptions);
     std::unique_ptr<const vx_array, decltype(&vx_array_free)> array{
         vx_array_from_arrow(
             session.get(), &arrowArray, &arrowSchema, false, &error),

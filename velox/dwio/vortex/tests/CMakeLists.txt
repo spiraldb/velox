@@ -148,3 +148,38 @@ if(VELOX_ENABLE_BENCHMARKS AND VELOX_ENABLE_PARQUET AND VELOX_ENABLE_HIVE_CONNEC
     )
   endif()
 endif()
+
+if(VELOX_ENABLE_BENCHMARKS AND VELOX_ENABLE_PARQUET AND VELOX_ENABLE_NIMBLE)
+  add_executable(
+    velox_dwio_vortex_row_reader_benchmark
+    VortexRowReaderBenchmark.cpp
+  )
+  target_link_libraries(
+    velox_dwio_vortex_row_reader_benchmark
+    velox_dwio_vortex_reader
+    velox_dwio_vortex_test_support
+    velox_dwio_parquet_reader
+    velox_dwio_parquet_writer
+    velox_vector_test_lib
+    nimble_common_file_writer
+    nimble_velox_selective
+    Folly::follybenchmark
+  )
+
+  add_executable(
+    velox_vortex_tpch_data_generator
+    TpchBenchmarkDataGenerator.cpp
+  )
+  target_link_libraries(
+    velox_vortex_tpch_data_generator
+    velox_arrow_bridge
+    velox_dwio_common
+    velox_dwio_parquet_writer
+    velox_file
+    velox_tpch_gen
+    nimble_writer
+    Vortex::vortex_velox
+    Folly::folly
+    gflags::gflags
+  )
+endif()

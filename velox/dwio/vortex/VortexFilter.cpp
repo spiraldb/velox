@@ -84,6 +84,18 @@ ScalarPtr integerScalar(const Type& type, int64_t value) {
 }
 
 VortexExpressionPtr scalarLiteral(const Type& type, int64_t value) {
+  if (type.isDate()) {
+    vx_error* error{nullptr};
+    ScalarPtr scalar{
+        vx_velox_scalar_new_date_days(
+            static_cast<int32_t>(value), false, &error),
+        vx_velox_scalar_free};
+    if (error != nullptr) {
+      failLiteral("create a Vortex date scalar", error);
+    }
+    VELOX_CHECK_NOT_NULL(scalar);
+    return literal(scalar.get());
+  }
   auto scalar = integerScalar(type, value);
   if (scalar == nullptr) {
     return nullptr;
@@ -355,6 +367,9 @@ VortexExpressionPtr integerValues(
     const Type& type,
     const vx_expression* column,
     std::vector<int64_t> values) {
+  if (type.isDate()) {
+    return nullptr;
+  }
   const auto bounds = integerBounds(type);
   if (!bounds.has_value()) {
     return nullptr;
@@ -362,6 +377,9 @@ VortexExpressionPtr integerValues(
   std::erase_if(values, [&](int64_t value) {
     return value < bounds->first || value > bounds->second;
   });
+  if (!vx_velox_can_push_down_integer_values(values.size())) {
+    return nullptr;
+  }
   std::sort(values.begin(), values.end());
   values.erase(std::unique(values.begin(), values.end()), values.end());
 
@@ -613,7 +631,7 @@ VortexExpressionPtr convertFilter(
   if (!filter.isDeterministic()) {
     return nullptr;
   }
-  if (type.isDate() || type.isTime() || type.isDecimal()) {
+  if (type.isTime() || type.isDecimal()) {
     return nullptr;
   }
   if (filter.kind() == velox::common::FilterKind::kIsNull) {

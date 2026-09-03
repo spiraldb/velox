@@ -63,6 +63,22 @@ if(${VELOX_BUILD_TEST_UTILS})
     Folly::follybenchmark
     fmt::fmt
   )
+
+  if(VELOX_ENABLE_NIMBLE)
+    target_compile_definitions(
+      velox_query_benchmark
+      PRIVATE VELOX_ENABLE_NIMBLE
+    )
+    target_link_libraries(velox_query_benchmark nimble_velox_selective)
+  endif()
+
+  if(VELOX_ENABLE_VORTEX)
+    target_compile_definitions(
+      velox_query_benchmark
+      PRIVATE VELOX_ENABLE_VORTEX
+    )
+    target_link_libraries(velox_query_benchmark velox_dwio_vortex_reader)
+  endif()
 endif()
 
 if(${VELOX_ENABLE_BENCHMARKS_BASIC})

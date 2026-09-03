@@ -19,6 +19,7 @@
 #include "velox/common/file/FileSystems.h"
 #include "velox/dwio/common/ReaderFactory.h"
 #include "velox/tpch/gen/TpchGen.h"
+#include "velox/type/TimestampConversion.h"
 
 #include <fstream>
 
@@ -26,32 +27,61 @@ namespace facebook::velox::exec::test {
 
 namespace {
 
-/// DWRF does not support Date type and Varchar is used.
-/// Return the Date filter expression as per data format.
+// Formats can represent TPC-H dates as VARCHAR, DATE, or epoch-day integers.
+// Returns a filter expression for the physical type.
 std::string formatDateFilter(
     const std::string& stringDate,
     const RowTypePtr& rowType,
     const std::string& lowerBound,
     const std::string& upperBound) {
-  bool isDwrf = rowType->findChild(stringDate)->isVarchar();
-  auto suffix = isDwrf ? "" : "::DATE";
+  const auto dateType = rowType->findChild(stringDate);
+  const auto integerDate = !dateType->isDate() &&
+      (dateType->kind() == TypeKind::INTEGER ||
+       dateType->kind() == TypeKind::BIGINT);
+  const auto formatBound = [&](const std::string& bound) {
+    if (!integerDate) {
+      return fmt::format("{}{}", bound, dateType->isVarchar() ? "" : "::DATE");
+    }
+    VELOX_CHECK_GE(bound.size(), 2);
+    VELOX_CHECK_EQ(bound.front(), '\'');
+    VELOX_CHECK_EQ(bound.back(), '\'');
+    const std::string_view date{bound.data() + 1, bound.size() - 2};
+    const auto days = util::fromDateString(
+        date.data(), date.size(), util::ParseMode::kPrestoCast);
+    VELOX_CHECK(!days.hasError(), "Invalid TPC-H date bound: {}", bound);
+    return fmt::format("{} '{}'", dateType->toString(), days.value());
+  };
 
   if (!lowerBound.empty() && !upperBound.empty()) {
     return fmt::format(
-        "{} between {}{} and {}{}",
+        "{} between {} and {}",
         stringDate,
-        lowerBound,
-        suffix,
-        upperBound,
-        suffix);
+        formatBound(lowerBound),
+        formatBound(upperBound));
   } else if (!lowerBound.empty()) {
-    return fmt::format("{} > {}{}", stringDate, lowerBound, suffix);
+    return fmt::format("{} > {}", stringDate, formatBound(lowerBound));
   } else if (!upperBound.empty()) {
-    return fmt::format("{} < {}{}", stringDate, upperBound, suffix);
+    return fmt::format("{} < {}", stringDate, formatBound(upperBound));
   }
 
   VELOX_FAIL(
       "Date range check expression must have either a lower or an upper bound");
+}
+
+std::string formatYearProjection(
+    const std::string& dateColumn,
+    const RowTypePtr& rowType,
+    const std::string& alias) {
+  const auto dateType = rowType->findChild(dateColumn);
+  if (!dateType->isDate() &&
+      (dateType->kind() == TypeKind::INTEGER ||
+       dateType->kind() == TypeKind::BIGINT)) {
+    return fmt::format(
+        "year(date_add('day', cast({} as INTEGER), DATE '1970-01-01')) AS {}",
+        dateColumn,
+        alias);
+  }
+  return fmt::format("year({}) AS {}", dateColumn, alias);
 }
 
 std::vector<std::string> mergeColumnNames(
@@ -909,7 +939,8 @@ TpchPlan TpchQueryBuilder::getQ7Plan() const {
               {"cust_nation",
                "supp_nation",
                "l_extendedprice * (1.0 - l_discount) as part_revenue",
-               "year(l_shipdate) as l_year"})
+               formatYearProjection(
+                   "l_shipdate", lineitemSelectedRowType, "l_year")})
           .partialAggregation(
               {"supp_nation", "cust_nation", "l_year"},
               {"sum(part_revenue) as revenue"})
@@ -1092,7 +1123,8 @@ TpchPlan TpchQueryBuilder::getQ8Plan() const {
           .project(
               {"volume",
                "(CASE WHEN n_name = 'BRAZIL' THEN volume ELSE 0.0 END) as brazil_volume",
-               "year(o_orderdate) AS o_year"})
+               formatYearProjection(
+                   "o_orderdate", ordersSelectedRowType, "o_year")})
           .partialAggregation(
               {"o_year"},
               {"sum(brazil_volume) as volume_brazil",
@@ -1230,7 +1262,8 @@ TpchPlan TpchQueryBuilder::getQ9Plan(const std::string& partFilter) const {
                   {"ps_supplycost", "o_orderdate", "n_name"}))
           .project(
               {"n_name AS nation",
-               "year(o_orderdate) AS o_year",
+               formatYearProjection(
+                   "o_orderdate", ordersSelectedRowType, "o_year"),
                "l_extendedprice * (1.0 - l_discount) - ps_supplycost * l_quantity AS amount"})
           .partialAggregation(
               {"nation", "o_year"}, {"sum(amount) AS sum_profit"})

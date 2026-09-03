@@ -24,6 +24,7 @@
 #include "velox/dwio/vortex/VortexArray.h"
 #include "velox/dwio/vortex/VortexFile.h"
 #include "velox/dwio/vortex/VortexSplitMapper.h"
+#include "velox/dwio/vortex/VortexVector.h"
 
 struct vx_data_source;
 struct vx_partition;
@@ -108,10 +109,19 @@ class VortexRowReader : public common::RowReader {
   std::optional<size_t> estimatedRowSize() const override;
 
  private:
-  // Stores one filtered Vortex slice and its absolute source-row indexes.
+  // Retains one natural Vortex array and its prepared field exporters.
+  struct PendingBatch {
+    VortexArray values;
+    VortexRowPositions rowPositions;
+    std::vector<std::optional<VortexArray>> fields;
+    std::vector<std::shared_ptr<VortexExportCursor>> exporters;
+  };
+
+  // Identifies one Velox output window inside a retained Vortex array.
   struct InputBatch {
-    std::optional<VortexArray> values;
-    std::vector<uint64_t> rowIndices;
+    std::shared_ptr<PendingBatch> pending;
+    size_t begin{0};
+    size_t end{0};
   };
 
   // Starts a filtered scan at the next unread absolute source row.
@@ -143,7 +153,7 @@ class VortexRowReader : public common::RowReader {
   void addRowNumber(
       VectorPtr& result,
       const BufferPtr& selectedRows,
-      const std::vector<uint64_t>& rowIndices) const;
+      const InputBatch& batch) const;
 
   // Returns the next non-empty array from the Vortex scan.
   std::optional<VortexArray> nextVortexBatch();
@@ -217,14 +227,17 @@ class VortexRowReader : public common::RowReader {
   // Records whether the current Vortex scan reached its end.
   bool scanFinished_{false};
 
-  // Retains the current Vortex batch across read calls.
-  std::optional<VortexArray> pendingBatch_;
+  // Records whether scan batches contain explicit absolute row indexes.
+  bool scanIncludesRowIndex_{true};
+
+  // Tracks the first row of the next unfiltered Vortex batch.
+  uint64_t nextScanRow_{0};
+
+  // Retains the current Vortex batch across read calls and lazy loads.
+  std::shared_ptr<PendingBatch> pendingBatch_;
 
   // Tracks the first unread row in the retained batch.
   size_t pendingOffset_{0};
-
-  // Stores absolute source-row indexes for the retained batch.
-  std::vector<uint64_t> pendingRowIndices_;
 
   // Counts natural splits excluded through metadata statistics.
   int64_t skippedStrides_{0};

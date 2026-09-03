@@ -30,6 +30,7 @@
 #include "velox/dwio/vortex/VortexFfi.h"
 #include "velox/dwio/vortex/VortexFilter.h"
 #include "velox/dwio/vortex/VortexVector.h"
+#include "velox/type/StringView.h"
 
 namespace facebook::velox::dwio::vortex {
 namespace {
@@ -179,6 +180,9 @@ std::optional<size_t> fixedWidthTypeSize(const TypePtr& type) {
   if (type->isFixedWidth()) {
     return type->cppSizeInBytes();
   }
+  if (type->isVarchar() || type->isVarbinary()) {
+    return sizeof(StringView);
+  }
   if (!type->isRow()) {
     return std::nullopt;
   }
@@ -256,10 +260,16 @@ std::optional<column_index_t> sourceChannelFor(
   return rowType->getChildIdxIfExists(fieldName);
 }
 
-std::unique_ptr<vx_expression, decltype(&vx_velox_expression_free)>
-scanProjection(
+struct VortexScanProjection {
+  std::unique_ptr<vx_expression, decltype(&vx_velox_expression_free)>
+      expression{nullptr, vx_velox_expression_free};
+  bool includesRowIndex{false};
+};
+
+VortexScanProjection scanProjection(
     const RowTypePtr& rowType,
     const std::shared_ptr<velox::common::ScanSpec>& scanSpec,
+    bool filterRows,
     std::vector<std::optional<column_index_t>>& scanChannelsBySource) {
   scanChannelsBySource.assign(rowType->size(), std::nullopt);
   std::vector<bool> included(rowType->size(), false);
@@ -284,27 +294,39 @@ scanProjection(
       continue;
     }
     const auto& name = rowType->nameOf(sourceChannel);
-    scanChannelsBySource[sourceChannel] = fieldNames.size() + 1;
+    scanChannelsBySource[sourceChannel] = fieldNames.size();
     fieldNames.push_back(vx_view{name.data(), name.size()});
   }
 
-  const vx_view rowIndexName{
-      kVortexRowIndexField.data(), kVortexRowIndexField.size()};
+  const bool includeRowIndex = filterRows || fieldNames.empty();
+  if (includeRowIndex) {
+    for (auto& scanChannel : scanChannelsBySource) {
+      if (scanChannel.has_value()) {
+        ++scanChannel.value();
+      }
+    }
+  }
   vx_error* error{nullptr};
   std::unique_ptr<vx_expression, decltype(&vx_velox_expression_free)>
-      projection{
-          vx_velox_expression_select_with_row_index(
-              fieldNames.empty() ? nullptr : fieldNames.data(),
-              fieldNames.size(),
-              rowIndexName,
-              &error),
-          vx_velox_expression_free};
+      projection{nullptr, vx_velox_expression_free};
+  if (includeRowIndex) {
+    const vx_view rowIndexName{
+        kVortexRowIndexField.data(), kVortexRowIndexField.size()};
+    projection.reset(vx_velox_expression_select_with_row_index(
+        fieldNames.empty() ? nullptr : fieldNames.data(),
+        fieldNames.size(),
+        rowIndexName,
+        &error));
+  } else {
+    projection.reset(vx_velox_expression_select(
+        fieldNames.data(), fieldNames.size(), &error));
+  }
   if (error != nullptr) {
     failVortex("create the Vortex scan projection", error);
   }
   VELOX_USER_CHECK_NOT_NULL(
       projection, "Failed to create a Vortex projection expression");
-  return projection;
+  return {std::move(projection), includeRowIndex};
 }
 
 void scatterLazyRows(RowSet rows, vector_size_t resultSize, VectorPtr& result) {
@@ -320,6 +342,21 @@ void scatterLazyRows(RowSet rows, vector_size_t resultSize, VectorPtr& result) {
   result->disableMemo();
   result = BaseVector::wrapInDictionary(
       nullptr, std::move(indices), resultSize, std::move(result));
+}
+
+bool isIdentityRows(RowSet rows, size_t length) {
+  if (rows.data() == nullptr) {
+    return true;
+  }
+  if (rows.size() != length) {
+    return false;
+  }
+  for (vector_size_t row = 0; row < rows.size(); ++row) {
+    if (rows[row] != row) {
+      return false;
+    }
+  }
+  return true;
 }
 
 VectorPtr preserveParentNullsForFiltering(
@@ -406,7 +443,10 @@ class VortexLazyLoader final : public VectorLoader {
  public:
   VortexLazyLoader(
       std::shared_ptr<VortexFile> file,
-      VortexArray field,
+      std::optional<VortexArray> field,
+      std::shared_ptr<VortexExportCursor> exporter,
+      size_t exportOffset,
+      size_t exportLength,
       TypePtr sourceType,
       TypePtr targetType,
       bool mapRowFieldsByPosition,
@@ -416,6 +456,9 @@ class VortexLazyLoader final : public VectorLoader {
       memory::MemoryPool& pool)
       : file_{std::move(file)},
         field_{std::move(field)},
+        exporter_{std::move(exporter)},
+        exportOffset_{exportOffset},
+        exportLength_{exportLength},
         sourceType_{std::move(sourceType)},
         targetType_{std::move(targetType)},
         mapRowFieldsByPosition_{mapRowFieldsByPosition},
@@ -448,24 +491,45 @@ class VortexLazyLoader final : public VectorLoader {
     if (hook != nullptr) {
       VELOX_CHECK(supportsHook());
       if (supportsNativeVortexType(sourceType_)) {
+        VELOX_CHECK(field_.has_value());
+        auto field = exporter_ == nullptr
+            ? field_.value()
+            : field_->slice(exportOffset_, exportOffset_ + exportLength_);
         loadVortexValueHook(
             file_->session(),
-            field_,
+            field,
             sourceType_,
             effectiveRows,
             {},
             *hook,
             pool_);
       } else {
+        VELOX_CHECK(field_.has_value());
         auto loaded = importVortexVector(
-            file_->session(), field_, sourceType_, effectiveRows, pool_);
+            file_->session(),
+            field_.value(),
+            sourceType_,
+            effectiveRows,
+            pool_);
         loadVectorValueHook(loaded, *hook);
       }
       return;
     }
 
-    auto loaded = importVortexVector(
-        file_->session(), field_, sourceType_, effectiveRows, pool_);
+    VectorPtr loaded;
+    if (exporter_ == nullptr) {
+      VELOX_CHECK(field_.has_value());
+      loaded = importVortexVector(
+          file_->session(), field_.value(), sourceType_, effectiveRows, pool_);
+    } else if (!isIdentityRows(effectiveRows, exportLength_)) {
+      VELOX_CHECK(field_.has_value());
+      auto field = field_->slice(exportOffset_, exportOffset_ + exportLength_);
+      loaded = importVortexVector(
+          file_->session(), field, sourceType_, effectiveRows, pool_);
+    } else {
+      loaded = exporter_->import(
+          exportOffset_, exportLength_, sourceType_, effectiveRows, pool_);
+    }
     loaded =
         adaptVortexVectorType(loaded, targetType_, mapRowFieldsByPosition_);
     loaded = applyNestedConstants(
@@ -475,7 +539,10 @@ class VortexLazyLoader final : public VectorLoader {
   }
 
   std::shared_ptr<VortexFile> file_;
-  VortexArray field_;
+  std::optional<VortexArray> field_;
+  std::shared_ptr<VortexExportCursor> exporter_;
+  size_t exportOffset_;
+  size_t exportLength_;
   TypePtr sourceType_;
   TypePtr targetType_;
   bool mapRowFieldsByPosition_;
@@ -598,11 +665,14 @@ void VortexRowReader::startScan() {
     pushedFilters_.push_back(const_cast<common::ScanSpec*>(pushedFilter));
   }
   PushedFilterGuard pushedFilterGuard{*scanSpec_, pushedFilters_};
-  auto projection = scanProjection(rowType_, scanSpec_, scanChannelsBySource_);
+  auto projection = scanProjection(
+      rowType_, scanSpec_, filter.expression != nullptr, scanChannelsBySource_);
+  scanIncludesRowIndex_ = projection.includesRowIndex;
+  nextScanRow_ = currentRow_;
   const vx_velox_scan_options scanOptions{
       .struct_size = sizeof(vx_velox_scan_options),
       .abi_version = VX_VELOX_ABI_VERSION,
-      .projection = projection.get(),
+      .projection = projection.expression.get(),
       .filter = filter.expression.get(),
       .row_range_begin = currentRow_,
       .row_range_end = retainedRange->end,
@@ -723,7 +793,6 @@ void VortexRowReader::advanceRetainedRange() {
 
 void VortexRowReader::closeScan() {
   pendingBatch_.reset();
-  pendingRowIndices_.clear();
   pendingOffset_ = 0;
   if (partition_ != nullptr) {
     vx_velox_partition_free(partition_);
@@ -752,7 +821,7 @@ uint64_t VortexRowReader::next(
   currentRow_ += rowsToRead;
   auto projected = projectBatch(input, mutation, firstRow, rowsToRead);
   result = std::move(projected.output);
-  addRowNumber(result, projected.selectedRows, input.rowIndices);
+  addRowNumber(result, projected.selectedRows, input);
   if (retainedRange != nullptr && currentRow_ == retainedRange->end) {
     verifyScanEnded();
     closeScan();
@@ -800,26 +869,27 @@ VortexRowReader::InputBatch VortexRowReader::readInputBatch(
     vector_size_t size) {
   VELOX_CHECK_GT(size, 0);
   InputBatch result;
-  if (!pendingBatch_.has_value()) {
+  if (pendingBatch_ == nullptr) {
     return result;
   }
-  VELOX_CHECK_LT(pendingOffset_, pendingBatch_->size());
-  VELOX_CHECK_EQ(pendingBatch_->size(), pendingRowIndices_.size());
+  VELOX_CHECK_LT(pendingOffset_, pendingBatch_->values.size());
+  VELOX_CHECK_EQ(
+      pendingBatch_->values.size(), pendingBatch_->rowPositions.size());
   const auto windowEnd = currentRow_ + size;
-  VELOX_CHECK_GE(pendingRowIndices_[pendingOffset_], currentRow_);
-  if (pendingRowIndices_[pendingOffset_] >= windowEnd) {
+  const auto firstPendingRow = pendingBatch_->rowPositions.at(pendingOffset_);
+  VELOX_CHECK_GE(firstPendingRow, currentRow_);
+  if (firstPendingRow >= windowEnd) {
     return result;
   }
 
-  const auto begin = pendingRowIndices_.begin() + pendingOffset_;
-  const auto end = std::lower_bound(begin, pendingRowIndices_.end(), windowEnd);
-  const auto endOffset = static_cast<size_t>(end - pendingRowIndices_.begin());
-  result.values = pendingBatch_->slice(pendingOffset_, endOffset);
-  result.rowIndices.assign(begin, end);
+  const auto endOffset =
+      pendingBatch_->rowPositions.lowerBound(pendingOffset_, windowEnd);
+  result.pending = pendingBatch_;
+  result.begin = pendingOffset_;
+  result.end = endOffset;
   pendingOffset_ = endOffset;
-  if (pendingOffset_ == pendingBatch_->size()) {
+  if (pendingOffset_ == pendingBatch_->values.size()) {
     pendingBatch_.reset();
-    pendingRowIndices_.clear();
     pendingOffset_ = 0;
   }
   return result;
@@ -834,7 +904,10 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
   struct DeferredField {
     column_index_t channel;
     std::string fieldName;
-    VortexArray field;
+    std::optional<VortexArray> field;
+    std::shared_ptr<VortexExportCursor> exporter;
+    size_t exportOffset;
+    size_t exportLength;
     TypePtr sourceType;
     TypePtr targetType;
   };
@@ -842,7 +915,27 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
   std::vector<VectorPtr> children;
   children.reserve(requestedType_->size());
   std::vector<DeferredField> deferredFields;
-  const auto batchSize = static_cast<vector_size_t>(batch.rowIndices.size());
+  const auto batchSize = static_cast<vector_size_t>(batch.end - batch.begin);
+  auto fieldAt = [&](column_index_t scanChannel) -> VortexArray& {
+    VELOX_CHECK_NOT_NULL(batch.pending);
+    VELOX_CHECK_LT(scanChannel, batch.pending->fields.size());
+    auto& field = batch.pending->fields[scanChannel];
+    if (!field.has_value()) {
+      field = batch.pending->values.field(file_->session(), scanChannel);
+    }
+    return field.value();
+  };
+  auto exporterAt =
+      [&](column_index_t scanChannel) -> std::shared_ptr<VortexExportCursor> {
+    VELOX_CHECK_NOT_NULL(batch.pending);
+    VELOX_CHECK_LT(scanChannel, batch.pending->exporters.size());
+    auto& exporter = batch.pending->exporters[scanChannel];
+    if (exporter == nullptr) {
+      exporter = std::make_shared<VortexExportCursor>(
+          file_->session(), fieldAt(scanChannel));
+    }
+    return exporter;
+  };
   for (column_index_t i = 0; i < requestedType_->size(); ++i) {
     auto* childSpec = scanSpec_->childByName(requestedType_->nameOf(i));
     const auto sourceChannel =
@@ -867,7 +960,7 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
       children.push_back(nullptr);
       continue;
     }
-    if (!batch.values.has_value()) {
+    if (batch.pending == nullptr) {
       children.push_back(nullptr);
       continue;
     }
@@ -875,15 +968,24 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
         scanChannelsBySource_[sourceChannel.value()].has_value(),
         "The Vortex scan omitted a required field: {}",
         requestedType_->nameOf(i));
-    auto field = batch.values->field(
-        file_->session(), scanChannelsBySource_[sourceChannel.value()].value());
+    const auto scanChannel =
+        scanChannelsBySource_[sourceChannel.value()].value();
+    const auto sourceType = rowType_->childAt(sourceChannel.value());
+    const bool nativeExport = supportsNativeVortexType(sourceType);
+    auto exporter = nativeExport ? exporterAt(scanChannel) : nullptr;
+    std::optional<VortexArray> field = nativeExport
+        ? fieldAt(scanChannel)
+        : fieldAt(scanChannel).slice(batch.begin, batch.end);
     if (!needsEagerValues && childSpec != nullptr && childSpec->projectOut()) {
       deferredFields.push_back(
           DeferredField{
               childSpec->channel(),
               requestedType_->nameOf(i),
               std::move(field),
-              rowType_->childAt(sourceChannel.value()),
+              std::move(exporter),
+              batch.begin,
+              static_cast<size_t>(batchSize),
+              sourceType,
               requestedType_->childAt(i),
           });
       children.push_back(nullptr);
@@ -893,12 +995,10 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
       children.push_back(nullptr);
       continue;
     }
-    auto imported = importVortexVector(
-        file_->session(),
-        field,
-        rowType_->childAt(sourceChannel.value()),
-        {},
-        *pool_);
+    auto imported = nativeExport
+        ? exporter->import(batch.begin, batchSize, sourceType, {}, *pool_)
+        : importVortexVector(
+              file_->session(), field.value(), sourceType, {}, *pool_);
     imported = applyNestedConstants(std::move(imported), childSpec);
     children.push_back(preserveParentNullsForFiltering(
         adaptVortexVectorType(
@@ -908,8 +1008,13 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
   auto input = std::make_shared<RowVector>(
       pool_, requestedType_, nullptr, batchSize, std::move(children));
 
-  std::vector<uint64_t> passed(bits::nwords(rowsToRead), ~uint64_t{0});
+  const bool hasDeltaUpdate = std::ranges::any_of(
+      scanSpec_->children(),
+      [](const auto& child) { return child->deltaUpdate() != nullptr; });
+  std::vector<uint64_t> passed;
+  std::vector<uint64_t> compactDeleted;
   if (mutation != nullptr) {
+    passed.assign(bits::nwords(rowsToRead), ~uint64_t{0});
     if (mutation->deletedRows != nullptr) {
       bits::andWithNegatedBits(
           passed.data(), mutation->deletedRows, 0, rowsToRead);
@@ -921,39 +1026,39 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
         }
       });
     }
+    compactDeleted.assign(bits::nwords(batchSize), 0);
   }
 
-  std::vector<uint64_t> compactDeleted(bits::nwords(batchSize), 0);
   std::vector<vector_size_t> sourceRows;
-  const bool hasDeltaUpdate = std::ranges::any_of(
-      scanSpec_->children(),
-      [](const auto& child) { return child->deltaUpdate() != nullptr; });
   if (hasDeltaUpdate) {
     sourceRows.reserve(batchSize);
   }
-  for (vector_size_t row = 0; row < batchSize; ++row) {
-    VELOX_USER_CHECK_GE(
-        batch.rowIndices[row],
-        firstRow,
-        "A Vortex row index precedes the current source window: {}",
-        batch.rowIndices[row]);
-    const auto relativeRow = batch.rowIndices[row] - firstRow;
-    VELOX_USER_CHECK_LT(
-        relativeRow,
-        rowsToRead,
-        "A Vortex row index exceeds the current source window: {}",
-        batch.rowIndices[row]);
-    if (!bits::isBitSet(passed.data(), relativeRow)) {
-      bits::setBit(compactDeleted.data(), row);
-    }
-    if (hasDeltaUpdate) {
-      const auto splitRow = batch.rowIndices[row] - rowRange_.begin;
-      VELOX_USER_CHECK_LE(
-          splitRow,
-          static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
-          "A Vortex delta row exceeds the Velox row limit: {}",
-          splitRow);
-      sourceRows.push_back(static_cast<vector_size_t>(splitRow));
+  if (mutation != nullptr || hasDeltaUpdate) {
+    for (vector_size_t row = 0; row < batchSize; ++row) {
+      const auto rowIndex = batch.pending->rowPositions.at(batch.begin + row);
+      VELOX_USER_CHECK_GE(
+          rowIndex,
+          firstRow,
+          "A Vortex row index precedes the current source window: {}",
+          rowIndex);
+      const auto relativeRow = rowIndex - firstRow;
+      VELOX_USER_CHECK_LT(
+          relativeRow,
+          rowsToRead,
+          "A Vortex row index exceeds the current source window: {}",
+          rowIndex);
+      if (mutation != nullptr && !bits::isBitSet(passed.data(), relativeRow)) {
+        bits::setBit(compactDeleted.data(), row);
+      }
+      if (hasDeltaUpdate) {
+        const auto splitRow = rowIndex - rowRange_.begin;
+        VELOX_USER_CHECK_LE(
+            splitRow,
+            static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
+            "A Vortex delta row exceeds the Velox row limit: {}",
+            splitRow);
+        sourceRows.push_back(static_cast<vector_size_t>(splitRow));
+      }
     }
   }
   const common::Mutation compactMutation{
@@ -986,6 +1091,9 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
         std::make_unique<VortexLazyLoader>(
             file_,
             std::move(deferred.field),
+            std::move(deferred.exporter),
+            deferred.exportOffset,
+            deferred.exportLength,
             deferred.sourceType,
             deferred.targetType,
             mapRowFieldsByPosition_,
@@ -1000,7 +1108,7 @@ common::RowReader::ProjectColumnsResult VortexRowReader::projectBatch(
 void VortexRowReader::addRowNumber(
     VectorPtr& result,
     const BufferPtr& selectedRows,
-    const std::vector<uint64_t>& rowIndices) const {
+    const InputBatch& batch) const {
   if (!rowNumberColumnInfo_.has_value()) {
     return;
   }
@@ -1016,9 +1124,11 @@ void VortexRowReader::addRowNumber(
   const auto* rawSelectedRows =
       selectedRows ? selectedRows->as<vector_size_t>() : nullptr;
   for (vector_size_t i = 0; i < result->size(); ++i) {
+    VELOX_CHECK_NOT_NULL(batch.pending);
     const auto sourceRow = rawSelectedRows == nullptr ? i : rawSelectedRows[i];
-    VELOX_CHECK_LT(sourceRow, rowIndices.size());
-    rawRowNumbers[i] = static_cast<int64_t>(rowIndices[sourceRow]);
+    VELOX_CHECK_LT(sourceRow, batch.end - batch.begin);
+    rawRowNumbers[i] = static_cast<int64_t>(
+        batch.pending->rowPositions.at(batch.begin + sourceRow));
   }
 
   auto names = row->type()->asRow().names();
@@ -1079,44 +1189,42 @@ std::optional<VortexArray> VortexRowReader::nextVortexBatch() {
 }
 
 void VortexRowReader::preparePendingBatch() {
-  if (pendingBatch_.has_value() || scanFinished_) {
+  if (pendingBatch_ != nullptr || scanFinished_) {
     return;
   }
-  pendingBatch_ = nextVortexBatch();
+  auto values = nextVortexBatch();
   pendingOffset_ = 0;
-  pendingRowIndices_.clear();
-  if (!pendingBatch_.has_value()) {
+  if (!values.has_value()) {
     return;
   }
 
   const auto* retainedRange = activeRetainedRange();
   VELOX_CHECK_NOT_NULL(retainedRange);
 
-  auto rowIndexField = pendingBatch_->field(file_->session(), 0);
-  pendingRowIndices_ = readVortexRowIndices(file_->session(), rowIndexField);
+  auto rowPositions = scanIncludesRowIndex_
+      ? readVortexRowIndices(
+            file_->session(), values->field(file_->session(), 0), *pool_)
+      : VortexRowPositions(nextScanRow_, values->size());
   VELOX_USER_CHECK_EQ(
-      pendingRowIndices_.size(),
-      pendingBatch_->size(),
+      rowPositions.size(),
+      values->size(),
       "Vortex row-index count does not match its batch size");
-  for (size_t i = 0; i < pendingRowIndices_.size(); ++i) {
-    VELOX_USER_CHECK_GE(
-        pendingRowIndices_[i],
-        currentRow_,
-        "A Vortex scan returned an already consumed row: {}",
-        pendingRowIndices_[i]);
-    VELOX_USER_CHECK_LT(
-        pendingRowIndices_[i],
-        retainedRange->end,
-        "A Vortex scan returned a row outside its assigned range: {}",
-        pendingRowIndices_[i]);
-    if (i != 0) {
-      VELOX_USER_CHECK_LT(
-          pendingRowIndices_[i - 1],
-          pendingRowIndices_[i],
-          "Vortex row indexes must be strictly increasing: {}",
-          pendingRowIndices_[i]);
+  rowPositions.validateRange(currentRow_, retainedRange->end);
+  if (!scanIncludesRowIndex_) {
+    nextScanRow_ += values->size();
+  }
+  size_t fieldCount{scanIncludesRowIndex_ ? 1U : 0U};
+  for (const auto& scanChannel : scanChannelsBySource_) {
+    if (scanChannel.has_value()) {
+      fieldCount = std::max<size_t>(fieldCount, scanChannel.value() + 1);
     }
   }
+  pendingBatch_ = std::make_shared<PendingBatch>(PendingBatch{
+      .values = std::move(values.value()),
+      .rowPositions = std::move(rowPositions),
+      .fields = std::vector<std::optional<VortexArray>>(fieldCount),
+      .exporters = std::vector<std::shared_ptr<VortexExportCursor>>(fieldCount),
+  });
 }
 
 vector_size_t VortexRowReader::rowsForNextRead(uint64_t size) {
@@ -1138,29 +1246,30 @@ vector_size_t VortexRowReader::rowsForNextRead(uint64_t size) {
   const auto maxRows = static_cast<vector_size_t>(std::min<uint64_t>(
       std::min<uint64_t>(size, retainedRange->end - currentRow_),
       std::numeric_limits<vector_size_t>::max()));
-  if (!pendingBatch_.has_value()) {
+  if (pendingBatch_ == nullptr) {
     return maxRows;
   }
 
-  VELOX_CHECK_LT(pendingOffset_, pendingRowIndices_.size());
+  VELOX_CHECK_LT(pendingOffset_, pendingBatch_->rowPositions.size());
   const auto windowEnd = currentRow_ + maxRows;
-  const auto begin = pendingRowIndices_.begin() + pendingOffset_;
-  if (*begin >= windowEnd) {
+  if (pendingBatch_->rowPositions.at(pendingOffset_) >= windowEnd) {
     return maxRows;
   }
-  const auto end = std::lower_bound(begin, pendingRowIndices_.end(), windowEnd);
-  VELOX_CHECK(begin != end);
-  return static_cast<vector_size_t>(*(end - 1) + 1 - currentRow_);
+  const auto end =
+      pendingBatch_->rowPositions.lowerBound(pendingOffset_, windowEnd);
+  VELOX_CHECK_GT(end, pendingOffset_);
+  return static_cast<vector_size_t>(
+      pendingBatch_->rowPositions.at(end - 1) + 1 - currentRow_);
 }
 
 void VortexRowReader::verifyScanEnded() {
   VELOX_USER_CHECK(
-      !pendingBatch_.has_value() || pendingOffset_ == pendingBatch_->size(),
+      pendingBatch_ == nullptr ||
+          pendingOffset_ == pendingBatch_->values.size(),
       "The Vortex scan produced rows beyond its assigned row range: {}, {}",
       rowRange_.begin,
       rowRange_.end);
   pendingBatch_.reset();
-  pendingRowIndices_.clear();
   pendingOffset_ = 0;
   VELOX_USER_CHECK(
       !nextVortexBatch().has_value(),

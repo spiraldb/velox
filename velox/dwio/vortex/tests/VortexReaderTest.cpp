@@ -27,6 +27,8 @@
 #include "velox/common/testutil/TempFilePath.h"
 #include "velox/dwio/common/Mutation.h"
 #include "velox/dwio/common/ScanSpec.h"
+#include "velox/dwio/vortex/VortexFile.h"
+#include "velox/dwio/vortex/VortexSplitMapper.h"
 #include "velox/dwio/vortex/VortexVector.h"
 #include "velox/dwio/vortex/tests/VortexTestFile.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
@@ -132,7 +134,10 @@ TEST_F(VortexReaderTest, fullScan) {
       makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
       makeNullableFlatVector<double>({1.5, std::nullopt, 3.5, 4.5, 5.5}),
       makeFlatVector<std::string>({"one", "two", "three", "four", "five"}),
-      makeFlatVector<bool>({true, false, true, true, false}),
+      makeNullableFlatVector<std::string>(
+          {"", "binary", std::nullopt, "twelve-bytes", "thirteen bytes"},
+          VARBINARY()),
+      makeNullableFlatVector<bool>({true, false, std::nullopt, true, false}),
   });
   const auto file = TempFilePath::create();
   writeVortex(file->getPath(), expected);
@@ -200,7 +205,7 @@ TEST_F(VortexReaderTest, estimatedRowSize) {
   variableWidthScanSpec->addField("c2", 0);
   variableWidthOptions.setScanSpec(variableWidthScanSpec);
   auto variableWidthReader = reader->createRowReader(variableWidthOptions);
-  EXPECT_EQ(variableWidthReader->estimatedRowSize(), std::nullopt);
+  EXPECT_EQ(variableWidthReader->estimatedRowSize(), sizeof(StringView));
 }
 
 TEST_F(VortexReaderTest, filtersProjectionAndMutation) {
@@ -353,8 +358,9 @@ TEST_F(VortexReaderTest, randomSkipConsumesRawRowsBeforePushedFilter) {
   common::RowReaderOptions options;
   auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
   scanSpec->addAllChildFields(*input->type());
+  const std::vector<int64_t> filterValues{0, 2, 4, 10};
   scanSpec->childByName("c0")->setFilter(
-      facebook::velox::common::createBigintValues({0, 2, 4, 6, 8, 10}, false));
+      facebook::velox::common::createBigintValues(filterValues, false));
   options.setScanSpec(scanSpec);
   auto rowReader = reader->createRowReader(options);
 
@@ -368,7 +374,8 @@ TEST_F(VortexReaderTest, randomSkipConsumesRawRowsBeforePushedFilter) {
     if (bits::isBitSet(deleted.data(), row)) {
       continue;
     }
-    if (expectedTracker.testOne() && row % 2 == 0) {
+    if (expectedTracker.testOne() &&
+        std::ranges::find(filterValues, row) != filterValues.end()) {
       expectedValues.push_back(row);
     }
   }
@@ -418,6 +425,119 @@ TEST_F(VortexReaderTest, deltaUpdateUsesRowsBeforeAnotherPushedFilter) {
       }),
       result);
   EXPECT_EQ(rowReader->next(input->size(), result), 0);
+}
+
+TEST_F(VortexReaderTest, implicitPositionsPreserveRowSemantics) {
+  constexpr vector_size_t kSize = 10;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kSize, folly::identity),
+      makeFlatVector<int64_t>(
+          kSize, [](vector_size_t row) { return 100 + row; }),
+  });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), input);
+
+  auto reader = openReader(file->getPath());
+  common::RowReaderOptions options;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*input->type());
+  AddRowOffsetUpdater updater;
+  scanSpec->childByName("c1")->setDeltaUpdate(&updater);
+  options.setScanSpec(scanSpec);
+  options.setRowNumberColumnInfo(common::RowNumberColumnInfo{0, "$row_id"});
+  auto rowReader = reader->createRowReader(options);
+
+  constexpr uint32_t kSeed = 271'828;
+  std::vector<uint64_t> deleted(bits::nwords(kSize), 0);
+  bits::setBit(deleted.data(), 3);
+  random::setSeed(kSeed);
+  random::RandomSkipTracker expectedTracker(0.5);
+  std::vector<int64_t> expectedRows;
+  std::vector<int64_t> expectedUpdated;
+  for (vector_size_t row = 0; row < kSize; ++row) {
+    if (bits::isBitSet(deleted.data(), row)) {
+      continue;
+    }
+    if (expectedTracker.testOne()) {
+      expectedRows.push_back(row);
+      expectedUpdated.push_back(100 + 11 * row);
+    }
+  }
+
+  random::setSeed(kSeed);
+  random::RandomSkipTracker actualTracker(0.5);
+  const common::Mutation mutation{
+      .deletedRows = deleted.data(),
+      .randomSkip = &actualTracker,
+  };
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(kSize, result, &mutation), kSize);
+  test::assertEqualVectors(
+      makeRowVector(
+          {"$row_id", "c0", "c1"},
+          {
+              makeFlatVector<int64_t>(expectedRows),
+              makeFlatVector<int64_t>(expectedRows),
+              makeFlatVector<int64_t>(expectedUpdated),
+          }),
+      result);
+  EXPECT_EQ(rowReader->next(kSize, result, &mutation), 0);
+}
+
+TEST_F(VortexReaderTest, implicitPositionsStartAtOwnedSplit) {
+  constexpr vector_size_t kBatchSize = 65'536;
+  constexpr vector_size_t kBatchCount = 4;
+  constexpr uint64_t kTotalRows =
+      static_cast<uint64_t>(kBatchSize) * kBatchCount;
+  std::vector<RowVectorPtr> batches;
+  for (vector_size_t batch = 0; batch < kBatchCount; ++batch) {
+    batches.push_back(makeRowVector(
+        {makeFlatVector<int64_t>(kBatchSize, [batch](vector_size_t row) {
+          return static_cast<int64_t>(batch) * kBatchSize + row;
+        })}));
+  }
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), batches);
+
+  std::vector<VortexRowRange> naturalRanges;
+  uint64_t fileSize{0};
+  {
+    auto input = std::make_unique<common::BufferedInput>(
+        std::make_shared<LocalReadFile>(file->getPath()), *pool());
+    VortexFile metadata{std::move(input), *pool()};
+    fileSize = metadata.fileSize();
+    for (const auto& [begin, end] : metadata.naturalSplits()) {
+      naturalRanges.push_back({begin, end});
+    }
+  }
+  ASSERT_GT(naturalRanges.size(), 1);
+  ASSERT_GT(fileSize, 1);
+  const auto owned = VortexSplitMapper::map(
+      kTotalRows, fileSize, naturalRanges, 1, fileSize - 1);
+  ASSERT_TRUE(owned.has_value());
+  ASSERT_GT(owned->begin, 0);
+
+  auto reader = openReader(file->getPath());
+  common::RowReaderOptions options;
+  options.range(1, fileSize - 1);
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*batches.front()->type());
+  options.setScanSpec(scanSpec);
+  options.setRowNumberColumnInfo(common::RowNumberColumnInfo{0, "$row_id"});
+  auto rowReader = reader->createRowReader(options);
+
+  VectorPtr result;
+  auto nextExpectedRow = owned->begin;
+  while (const auto rowsRead = rowReader->next(kTotalRows, result)) {
+    auto expectedRows =
+        makeFlatVector<int64_t>(rowsRead, [nextExpectedRow](vector_size_t row) {
+          return static_cast<int64_t>(nextExpectedRow + row);
+        });
+    test::assertEqualVectors(
+        makeRowVector({"$row_id", "c0"}, {expectedRows, expectedRows}), result);
+    nextExpectedRow += rowsRead;
+  }
+  EXPECT_EQ(nextExpectedRow, owned->end);
 }
 
 TEST_F(VortexReaderTest, requestedTypeWidening) {
@@ -779,12 +899,13 @@ TEST_F(VortexReaderTest, nativeBuffersOutliveReader) {
   test::assertEqualVectors(expected, retained);
 }
 
-TEST_F(VortexReaderTest, nativeImportChargesExactRetainedBytes) {
+TEST_F(VortexReaderTest, nativeCursorReservesPeakAndRetainsExactBytes) {
   auto expected =
       makeNullableFlatVector<int64_t>({11, std::nullopt, 33, 44, 55});
   const auto file = TempFilePath::create();
   writeVortex(file->getPath(), makeRowVector({expected}));
   const auto statsBefore = pool()->stats();
+  const auto usedBytesBefore = pool()->usedBytes();
 
   VectorPtr retained;
   {
@@ -802,15 +923,61 @@ TEST_F(VortexReaderTest, nativeImportChargesExactRetainedBytes) {
 
   const auto statsRetained = pool()->stats();
   EXPECT_EQ(statsRetained.numExternalAllocs - statsBefore.numExternalAllocs, 1);
+  EXPECT_EQ(statsRetained.numExternalFrees - statsBefore.numExternalFrees, 1);
   EXPECT_EQ(
       statsRetained.cumulativeExternalBytes -
           statsBefore.cumulativeExternalBytes,
-      5 * sizeof(int64_t) + 1);
+      2 * (5 * sizeof(int64_t) + sizeof(uint64_t)));
+  EXPECT_EQ(
+      pool()->usedBytes() - usedBytesBefore,
+      5 * sizeof(int64_t) + sizeof(uint64_t));
   test::assertEqualVectors(expected, retained);
 
   retained.reset();
   const auto statsReleased = pool()->stats();
-  EXPECT_EQ(statsReleased.numExternalFrees - statsBefore.numExternalFrees, 1);
+  EXPECT_EQ(statsReleased.numExternalFrees - statsBefore.numExternalFrees, 2);
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBefore);
+}
+
+TEST_F(VortexReaderTest, nativeCursorReservationFailureReleasesPool) {
+  constexpr vector_size_t kNumRows = 16'384;
+  auto expected =
+      makeFlatVector<int64_t>(kNumRows, [](vector_size_t row) { return row; });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), makeRowVector({expected}));
+
+  auto root = memory::memoryManager()->addRootPool(
+      "vortexNativeCursorReservationLimit", 2 << 20);
+  auto leaf = root->addLeafChild("vortexNativeCursorReservationLimitLeaf");
+  common::ReaderOptions readerOptions{leaf.get()};
+  auto reader = openReader(file->getPath(), readerOptions);
+  common::RowReaderOptions options;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*reader->rowType());
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(options);
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(kNumRows, result), kNumRows);
+
+  const auto usedBytesBeforePressure = leaf->usedBytes();
+  constexpr int64_t kRemainingCapacity = 64 << 10;
+  const auto pressureBytes =
+      root->capacity() - usedBytesBeforePressure - kRemainingCapacity;
+  ASSERT_GT(pressureBytes, 0);
+  leaf->reportExternalAllocation(pressureBytes);
+  const auto statsBeforeLoad = leaf->stats();
+  VELOX_ASSERT_THROW(
+      BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0)),
+      "Exceeded memory pool capacity");
+  const auto statsAfterLoad = leaf->stats();
+  EXPECT_EQ(
+      statsAfterLoad.numExternalAllocs, statsBeforeLoad.numExternalAllocs);
+  EXPECT_EQ(statsAfterLoad.numExternalFrees, statsBeforeLoad.numExternalFrees);
+  leaf->reportExternalFree(pressureBytes);
+  result.reset();
+  rowReader.reset();
+  reader.reset();
+  EXPECT_EQ(leaf->usedBytes(), 0);
 }
 
 TEST_F(VortexReaderTest, arrowMemoryHandlesRefundAndDeficit) {
@@ -855,9 +1022,9 @@ TEST_F(VortexReaderTest, arrowMemoryRejectsReservation) {
       std::string::npos);
 }
 
-TEST_F(VortexReaderTest, arrowFallbackTracksExternalMemory) {
-  auto expected =
-      makeFlatVector<std::string>({"one", "twenty-two", "three hundred"});
+TEST_F(VortexReaderTest, nativeStringImportTracksExternalMemory) {
+  auto expected = makeNullableFlatVector<std::string>(
+      {"", "a", std::nullopt, "abcdefghijkl", "abcdefghijklm"});
   const auto file = TempFilePath::create();
   writeVortex(file->getPath(), makeRowVector({expected}));
 
@@ -874,6 +1041,7 @@ TEST_F(VortexReaderTest, arrowFallbackTracksExternalMemory) {
     EXPECT_EQ(rowReader->next(expected->size(), result), expected->size());
     retained =
         BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    EXPECT_EQ(retained->encoding(), VectorEncoding::Simple::FLAT);
   }
 
   const auto statsRetained = pool()->stats();
@@ -887,6 +1055,410 @@ TEST_F(VortexReaderTest, arrowFallbackTracksExternalMemory) {
   retained.reset();
   const auto statsReleased = pool()->stats();
   EXPECT_EQ(statsReleased.numExternalFrees - statsBefore.numExternalFrees, 2);
+}
+
+TEST_F(VortexReaderTest, nativeDateAndDecimalStorageAcrossWindows) {
+  const int128_t largePositive = (static_cast<int128_t>(1) << 80) + 12'345;
+  const int128_t largeNegative = -((static_cast<int128_t>(1) << 76) + 98'765);
+  auto expected = makeRowVector({
+      makeNullableFlatVector<int32_t>({0, std::nullopt, 20'000, -10}, DATE()),
+      makeNullableFlatVector<int64_t>(
+          {12'345, std::nullopt, -9'876, 0}, DECIMAL(18, 2)),
+      makeNullableFlatVector<int128_t>(
+          {largePositive, std::nullopt, largeNegative, 0}, DECIMAL(30, 4)),
+  });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+  const auto usedBytesBeforeRead = pool()->usedBytes();
+
+  RowVectorPtr firstWindow;
+  RowVectorPtr secondWindow;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(2, result), 2);
+    firstWindow = makeRowVector({
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0)),
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1)),
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(2)),
+    });
+    EXPECT_EQ(rowReader->next(2, result), 2);
+    secondWindow = makeRowVector({
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0)),
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1)),
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(2)),
+    });
+  }
+
+  test::assertEqualVectors(expected->slice(0, 2), firstWindow);
+  test::assertEqualVectors(expected->slice(2, 2), secondWindow);
+  for (const auto& window : {firstWindow, secondWindow}) {
+    for (const auto& child : window->children()) {
+      EXPECT_EQ(child->encoding(), VectorEncoding::Simple::FLAT);
+    }
+  }
+  firstWindow.reset();
+  secondWindow.reset();
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBeforeRead);
+}
+
+TEST_F(VortexReaderTest, timestampArrowFallbackPreservesUnitsAndMetadata) {
+  auto timestamps = makeNullableFlatVector<Timestamp>({
+      Timestamp(-2, 0),
+      std::nullopt,
+      Timestamp(0, 0),
+      Timestamp(12'345, 0),
+  });
+  auto expected = makeRowVector({timestamps});
+  for (const auto unit : {
+           TimestampUnit::kSecond,
+           TimestampUnit::kMilli,
+           TimestampUnit::kMicro,
+           TimestampUnit::kNano,
+       }) {
+    const auto file = TempFilePath::create();
+    test::writeVortexFile(
+        file->getPath(),
+        {expected},
+        pool(),
+        ArrowOptions{.timestampUnit = unit});
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(expected->size(), result), expected->size());
+    test::assertEqualVectors(expected, result);
+  }
+
+  const auto zonedFile = TempFilePath::create();
+  test::writeVortexFile(
+      zonedFile->getPath(),
+      {expected},
+      pool(),
+      ArrowOptions{.timestampTimeZone = "UTC"});
+  VELOX_ASSERT_THROW(
+      openReader(zonedFile->getPath()),
+      "do not support timestamp timezone metadata: UTC");
+}
+
+TEST_F(VortexReaderTest, preservesDictionaryAndConstantStringsAcrossWindows) {
+  constexpr vector_size_t kNumRows = 65'536;
+  constexpr vector_size_t kBatchSize = 1'024;
+  auto dictionary = makeFlatVector<std::string>(
+      kNumRows,
+      [](vector_size_t row) {
+        return "dictionary value " + std::to_string(row % 16);
+      },
+      [](vector_size_t row) { return row % 19 == 0; });
+  auto constant = makeFlatVector<std::string>(
+      kNumRows, [](vector_size_t) { return "constant outlined value"; });
+  auto expected = makeRowVector({dictionary, constant});
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+  const auto usedBytesBeforeRead = pool()->usedBytes();
+
+  VectorPtr retainedDictionary;
+  VectorPtr retainedConstant;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    retainedDictionary =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    retainedConstant =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1));
+    ASSERT_EQ(
+        retainedDictionary->encoding(), VectorEncoding::Simple::DICTIONARY);
+    ASSERT_EQ(retainedConstant->encoding(), VectorEncoding::Simple::CONSTANT);
+    auto dictionaryBase = retainedDictionary->valueVector();
+    auto constantBase = retainedConstant->valueVector();
+    test::assertEqualVectors(
+        expected->slice(0, kBatchSize),
+        makeRowVector({retainedDictionary, retainedConstant}));
+
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    auto secondDictionary =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    auto secondConstant =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1));
+    ASSERT_EQ(secondDictionary->encoding(), VectorEncoding::Simple::DICTIONARY);
+    ASSERT_EQ(secondConstant->encoding(), VectorEncoding::Simple::CONSTANT);
+    EXPECT_EQ(secondDictionary->valueVector().get(), dictionaryBase.get());
+    EXPECT_EQ(secondConstant->valueVector().get(), constantBase.get());
+    test::assertEqualVectors(
+        expected->slice(kBatchSize, kBatchSize),
+        makeRowVector({secondDictionary, secondConstant}));
+  }
+
+  test::assertEqualVectors(
+      dictionary->slice(0, kBatchSize), retainedDictionary);
+  test::assertEqualVectors(constant->slice(0, kBatchSize), retainedConstant);
+  retainedDictionary.reset();
+  retainedConstant.reset();
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBeforeRead);
+}
+
+TEST_F(VortexReaderTest, nativeStructPreservesEncodedChildrenAcrossWindows) {
+  constexpr vector_size_t kNumRows = 65'536;
+  constexpr vector_size_t kBatchSize = 1'024;
+  auto dictionary = makeFlatVector<std::string>(
+      kNumRows,
+      [](vector_size_t row) {
+        return "nested dictionary value " + std::to_string(row % 16);
+      },
+      [](vector_size_t row) { return row % 19 == 0; });
+  auto constant =
+      makeConstant<std::string>("nested constant outlined value", kNumRows);
+  auto nested = makeRowVector(
+      {"dictionary", "constant"},
+      {dictionary, constant},
+      [](vector_size_t row) { return row % 53 == 0; });
+  auto expected = makeRowVector({nested});
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+  const auto usedBytesBeforeRead = pool()->usedBytes();
+
+  VectorPtr retained;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    retained =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    ASSERT_EQ(retained->encoding(), VectorEncoding::Simple::ROW);
+    auto* retainedRow = retained->asChecked<RowVector>();
+    EXPECT_EQ(
+        retainedRow->childAt(0)->encoding(),
+        VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        retainedRow->childAt(1)->encoding(), VectorEncoding::Simple::CONSTANT);
+    test::assertEqualVectors(nested->slice(0, kBatchSize), retained);
+
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    auto second =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    ASSERT_EQ(second->encoding(), VectorEncoding::Simple::ROW);
+    auto* secondRow = second->asChecked<RowVector>();
+    EXPECT_EQ(
+        secondRow->childAt(0)->encoding(), VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        secondRow->childAt(1)->encoding(), VectorEncoding::Simple::CONSTANT);
+    test::assertEqualVectors(nested->slice(kBatchSize, kBatchSize), second);
+  }
+
+  test::assertEqualVectors(nested->slice(0, kBatchSize), retained);
+  retained.reset();
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBeforeRead);
+}
+
+TEST_F(VortexReaderTest, nativeListsPreserveEncodedElementsAcrossWindows) {
+  constexpr vector_size_t kNumRows = 65'536;
+  constexpr vector_size_t kBatchSize = 1'024;
+  auto dictionary = makeArrayVector<std::string>(
+      kNumRows,
+      [](vector_size_t row) { return row % 53 == 0 ? 0 : 2; },
+      [](vector_size_t index) {
+        return "list dictionary value " + std::to_string(index % 16);
+      },
+      [](vector_size_t row) { return row % 53 == 0; },
+      [](vector_size_t index) { return index % 29 == 0; });
+  auto constant = makeArrayVector<std::string>(
+      kNumRows,
+      [](vector_size_t row) { return row % 47 == 0 ? 0 : 2; },
+      [](vector_size_t) { return "list constant outlined value"; },
+      [](vector_size_t row) { return row % 47 == 0; });
+  auto expected = makeRowVector({dictionary, constant});
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+  const auto usedBytesBeforeRead = pool()->usedBytes();
+
+  VectorPtr retainedDictionary;
+  VectorPtr retainedConstant;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    retainedDictionary =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    retainedConstant =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1));
+    ASSERT_EQ(retainedDictionary->encoding(), VectorEncoding::Simple::ARRAY);
+    ASSERT_EQ(retainedConstant->encoding(), VectorEncoding::Simple::ARRAY);
+    EXPECT_EQ(
+        retainedDictionary->asChecked<ArrayVector>()->elements()->encoding(),
+        VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        retainedConstant->asChecked<ArrayVector>()->elements()->encoding(),
+        VectorEncoding::Simple::CONSTANT);
+    auto dictionaryElements =
+        retainedDictionary->asChecked<ArrayVector>()->elements();
+    auto constantElements =
+        retainedConstant->asChecked<ArrayVector>()->elements();
+    test::assertEqualVectors(
+        expected->slice(0, kBatchSize),
+        makeRowVector({retainedDictionary, retainedConstant}));
+
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    auto secondDictionary =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    auto secondConstant =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(1));
+    EXPECT_EQ(
+        secondDictionary->asChecked<ArrayVector>()->elements()->encoding(),
+        VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        secondConstant->asChecked<ArrayVector>()->elements()->encoding(),
+        VectorEncoding::Simple::CONSTANT);
+    EXPECT_EQ(
+        secondDictionary->asChecked<ArrayVector>()->elements().get(),
+        dictionaryElements.get());
+    EXPECT_EQ(
+        secondConstant->asChecked<ArrayVector>()->elements().get(),
+        constantElements.get());
+    test::assertEqualVectors(
+        expected->slice(kBatchSize, kBatchSize),
+        makeRowVector({secondDictionary, secondConstant}));
+  }
+
+  test::assertEqualVectors(
+      dictionary->slice(0, kBatchSize), retainedDictionary);
+  test::assertEqualVectors(constant->slice(0, kBatchSize), retainedConstant);
+  retainedDictionary.reset();
+  retainedConstant.reset();
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBeforeRead);
+}
+
+TEST_F(VortexReaderTest, nativeMapsPreserveEncodedChildrenAcrossWindows) {
+  constexpr vector_size_t kNumRows = 65'536;
+  constexpr vector_size_t kBatchSize = 1'024;
+  auto maps = makeMapVector<std::string, std::string>(
+      kNumRows,
+      [](vector_size_t row) { return row % 53 == 0 ? 0 : 2; },
+      [](vector_size_t index) {
+        return "map key " + std::to_string(index % 2);
+      },
+      [](vector_size_t) { return "map constant outlined value"; },
+      [](vector_size_t row) { return row % 53 == 0; });
+  auto expected = makeRowVector({maps});
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+  const auto usedBytesBeforeRead = pool()->usedBytes();
+
+  VectorPtr retained;
+  {
+    auto reader = openReader(file->getPath());
+    common::RowReaderOptions options;
+    auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*reader->rowType());
+    options.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(options);
+
+    VectorPtr result;
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    retained =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    ASSERT_EQ(retained->encoding(), VectorEncoding::Simple::MAP);
+    auto* retainedMap = retained->asChecked<MapVector>();
+    EXPECT_EQ(
+        retainedMap->mapKeys()->encoding(), VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        retainedMap->mapValues()->encoding(), VectorEncoding::Simple::CONSTANT);
+    auto keys = retainedMap->mapKeys();
+    auto values = retainedMap->mapValues();
+    test::assertEqualVectors(maps->slice(0, kBatchSize), retained);
+
+    EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+    auto second =
+        BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+    ASSERT_EQ(second->encoding(), VectorEncoding::Simple::MAP);
+    auto* secondMap = second->asChecked<MapVector>();
+    EXPECT_EQ(
+        secondMap->mapKeys()->encoding(), VectorEncoding::Simple::DICTIONARY);
+    EXPECT_EQ(
+        secondMap->mapValues()->encoding(), VectorEncoding::Simple::CONSTANT);
+    EXPECT_EQ(secondMap->mapKeys().get(), keys.get());
+    EXPECT_EQ(secondMap->mapValues().get(), values.get());
+    test::assertEqualVectors(maps->slice(kBatchSize, kBatchSize), second);
+  }
+
+  test::assertEqualVectors(maps->slice(0, kBatchSize), retained);
+  retained.reset();
+  EXPECT_EQ(pool()->usedBytes(), usedBytesBeforeRead);
+}
+
+TEST_F(VortexReaderTest, nativeNestedListUsesAbsoluteOffsetsAcrossWindows) {
+  constexpr vector_size_t kNumRows = 130;
+  constexpr vector_size_t kBatchSize = 65;
+  std::vector<std::string> jsonRows;
+  jsonRows.reserve(kNumRows);
+  for (vector_size_t row = 0; row < kNumRows; ++row) {
+    if (row % 17 == 0) {
+      jsonRows.push_back("null");
+    } else if (row % 5 == 0) {
+      jsonRows.push_back("[]");
+    } else {
+      jsonRows.push_back(
+          fmt::format("[[{}, {}], [], [{}]]", row, row + 1, row + 2));
+    }
+  }
+  auto nested = makeNestedArrayVectorFromJson<int64_t>(jsonRows);
+  auto expected = makeRowVector({nested});
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), expected);
+
+  auto reader = openReader(file->getPath());
+  common::RowReaderOptions options;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*reader->rowType());
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+  test::assertEqualVectors(expected->slice(0, kBatchSize), result);
+  auto first =
+      BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+  ASSERT_EQ(first->encoding(), VectorEncoding::Simple::ARRAY);
+  auto firstElements = first->asChecked<ArrayVector>()->elements();
+  ASSERT_EQ(firstElements->encoding(), VectorEncoding::Simple::ARRAY);
+  EXPECT_EQ(rowReader->next(kBatchSize, result), kBatchSize);
+  test::assertEqualVectors(expected->slice(kBatchSize, kBatchSize), result);
+  auto loaded =
+      BaseVector::loadedVectorShared(result->as<RowVector>()->childAt(0));
+  ASSERT_EQ(loaded->encoding(), VectorEncoding::Simple::ARRAY);
+  EXPECT_EQ(
+      loaded->asChecked<ArrayVector>()->elements()->encoding(),
+      VectorEncoding::Simple::ARRAY);
+  EXPECT_EQ(
+      loaded->asChecked<ArrayVector>()->elements().get(), firstElements.get());
 }
 
 TEST_F(VortexReaderTest, sparseValueHookUsesLazyVectorRows) {
@@ -923,6 +1495,83 @@ TEST_F(VortexReaderTest, sparseValueHookUsesLazyVectorRows) {
       std::vector<std::optional<int64_t>>({std::nullopt, 50, std::nullopt}));
   EXPECT_TRUE(lazy->isLoaded());
   EXPECT_EQ(pool()->usedBytes(), memoryBeforeHook);
+}
+
+TEST_F(VortexReaderTest, sparseBooleanValueHookUsesPackedRows) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({0, 1, 2, 3, 4}),
+      makeNullableFlatVector<bool>({true, std::nullopt, false, true, false}),
+  });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), input);
+
+  auto reader = openReader(file->getPath());
+  common::RowReaderOptions options;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*input->type());
+  scanSpec->childByName("c0")->setFilter(
+      facebook::velox::common::createBigintValues({1, 3, 4}, false));
+  scanSpec->childByName("c0")->setProjectOut(false);
+  scanSpec->childByName("c1")->setChannel(0);
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(input->size(), result), input->size());
+  auto* lazy = result->as<RowVector>()->childAt(0)->asChecked<LazyVector>();
+  ASSERT_FALSE(lazy->isLoaded());
+  std::vector<vector_size_t> rows{0, 2};
+  CapturingHook hook(lazy->size());
+  const auto memoryBeforeHook = pool()->usedBytes();
+  lazy->load(rows, &hook);
+
+  EXPECT_EQ(hook.seen(), std::vector<bool>({true, true, false}));
+  EXPECT_EQ(
+      hook.values(),
+      std::vector<std::optional<int64_t>>(
+          {std::nullopt, int64_t{0}, std::nullopt}));
+  EXPECT_TRUE(lazy->isLoaded());
+  EXPECT_EQ(pool()->usedBytes(), memoryBeforeHook);
+}
+
+TEST_F(VortexReaderTest, sparseLazyLoadCanonicalizesOnlySelectedRows) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({0, 1, 2, 3, 4}),
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30, 40, 50}),
+  });
+  const auto file = TempFilePath::create();
+  writeVortex(file->getPath(), input);
+
+  auto reader = openReader(file->getPath());
+  common::RowReaderOptions options;
+  auto scanSpec = std::make_shared<velox::common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*input->type());
+  scanSpec->childByName("c0")->setFilter(
+      facebook::velox::common::createBigintValues({1, 3, 4}, false));
+  scanSpec->childByName("c0")->setProjectOut(false);
+  scanSpec->childByName("c1")->setChannel(0);
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(input->size(), result), input->size());
+  auto* lazy = result->as<RowVector>()->childAt(0)->asChecked<LazyVector>();
+  ASSERT_FALSE(lazy->isLoaded());
+  std::vector<vector_size_t> rows{0, 2};
+  const auto statsBefore = pool()->stats();
+  lazy->load(rows, nullptr);
+  const auto statsAfter = pool()->stats();
+
+  EXPECT_EQ(
+      statsAfter.cumulativeExternalBytes - statsBefore.cumulativeExternalBytes,
+      2 * sizeof(int64_t) + sizeof(uint64_t));
+  EXPECT_TRUE(lazy->isLoaded());
+  auto expected = makeNullableFlatVector<int64_t>({
+      std::nullopt,
+      std::nullopt,
+      50,
+  });
+  test::assertEqualVectors(expected, lazy->loadedVectorShared());
 }
 
 } // namespace

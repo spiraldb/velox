@@ -302,6 +302,25 @@ TEST_F(VortexFilterTest, integerWidthsAndBoolValues) {
       {true, false, false});
 }
 
+TEST_F(VortexFilterTest, dateRangeUsesExtensionLiteral) {
+  testFilter<int32_t>(
+      {-1, 0, 1, std::nullopt},
+      DATE(),
+      std::make_shared<velox::common::BigintRange>(0, 1, false),
+      {false, true, true, false});
+
+  auto input = makeRowVector(
+      {"value"},
+      {makeNullableFlatVector<int32_t>({0, 1, std::nullopt}, DATE())});
+  auto conversion = convert(
+      input,
+      std::make_shared<velox::common::BigintValuesUsingHashTable>(
+          0, 2, std::vector<int64_t>{0, 2}, false));
+  EXPECT_EQ(conversion.expression, nullptr);
+  EXPECT_TRUE(conversion.pushedFilters.empty());
+  EXPECT_EQ(conversion.residualFilters.size(), 1);
+}
+
 TEST_F(VortexFilterTest, nullTests) {
   testFilter<int64_t>(
       {1, std::nullopt},
@@ -442,6 +461,19 @@ TEST_F(VortexFilterTest, nestedFilterRemainsResidual) {
       scanSpec.childByName("nested")->childByName("score"));
 }
 
+TEST_F(VortexFilterTest, largeIntegerValueSetRemainsResidual) {
+  auto input =
+      makeRowVector({"value"}, {makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5})});
+  auto conversion = convert(
+      input,
+      sharedFilter(velox::common::createBigintValues({0, 2, 4, 6, 8}, false)));
+
+  EXPECT_EQ(conversion.expression, nullptr);
+  EXPECT_FALSE(conversion.fullyConverted());
+  EXPECT_TRUE(conversion.pushedFilters.empty());
+  ASSERT_EQ(conversion.residualFilters.size(), 1);
+}
+
 TEST_F(VortexFilterTest, preservesUnsupportedFilters) {
   const auto rowType =
       ROW({"value", "items", "missing"}, {REAL(), ARRAY(BIGINT()), BIGINT()});
@@ -510,12 +542,14 @@ TEST_F(VortexFilterTest, preservesConstantsSyntheticAndLogicalTypes) {
       std::make_shared<velox::common::BigintRange>(0, 10, false));
 
   auto conversion = convertVortexFilter(scanSpec, *rowType);
-  EXPECT_EQ(conversion.expression, nullptr);
-  EXPECT_TRUE(conversion.pushedFilters.empty());
+  EXPECT_NE(conversion.expression, nullptr);
+  EXPECT_EQ(
+      conversion.pushedFilters,
+      (std::vector<const velox::common::ScanSpec*>{date}));
   EXPECT_EQ(
       conversion.residualFilters,
       (std::vector<const velox::common::ScanSpec*>{
-          constant, rowIndex, date, decimal}));
+          constant, rowIndex, decimal}));
 }
 
 TEST_F(VortexFilterTest, preservesUnsupportedGenericIntegerMultiRange) {
@@ -534,11 +568,11 @@ TEST_F(VortexFilterTest, preservesUnsupportedGenericIntegerMultiRange) {
 }
 
 TEST_F(VortexFilterTest, mixesPushedAndResidualFilters) {
-  const auto rowType = ROW({"pushed", "date"}, {BIGINT(), DATE()});
+  const auto rowType = ROW({"pushed", "decimal"}, {BIGINT(), DECIMAL(10, 2)});
   velox::common::ScanSpec scanSpec{"<root>"};
   auto* pushed = scanSpec.getOrCreateChild("pushed");
   pushed->setFilter(std::make_shared<velox::common::BigintRange>(1, 2, false));
-  auto* residual = scanSpec.getOrCreateChild("date");
+  auto* residual = scanSpec.getOrCreateChild("decimal");
   residual->setFilter(
       std::make_shared<velox::common::BigintRange>(1, 2, false));
 

@@ -59,7 +59,6 @@ DEFINE_int32(
     "Percentage of lineitem columns to "
     "include in IO meter query. The columns are sorted by name and the n% first "
     "are scanned");
-
 void TpchBenchmark::initQueryBuilder() {
   queryBuilder_ =
       std::make_shared<TpchQueryBuilder>(toFileFormat(FLAGS_data_format));

@@ -57,13 +57,73 @@ class VortexArrowMemory {
   vx_velox_arrow_memory_callbacks callbacks_;
 };
 
+/// Defers one prepared Vortex array until Velox requests materialized values.
+class VortexExportCursor {
+ public:
+  /// Retains one array for later repeated native exports.
+  VortexExportCursor(const vx_session* session, const VortexArray& array);
+
+  ~VortexExportCursor();
+
+  VortexExportCursor(const VortexExportCursor&) = delete;
+  VortexExportCursor& operator=(const VortexExportCursor&) = delete;
+
+  /// Imports one contiguous window and applies an optional local selection.
+  VectorPtr import(
+      size_t offset,
+      size_t length,
+      const TypePtr& targetType,
+      RowSet sourceRows,
+      memory::MemoryPool& pool);
+
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+/// Retains absolute source-row positions without an intermediate copy.
+class VortexRowPositions {
+ public:
+  /// Creates contiguous positions that start at firstRow.
+  VortexRowPositions(uint64_t firstRow, size_t size);
+
+  /// Creates a position view over one retained U64 buffer.
+  VortexRowPositions(BufferPtr values, size_t size);
+
+  /// Returns the number of source-row positions.
+  size_t size() const;
+
+  /// Returns the source-row position at index.
+  uint64_t at(size_t index) const;
+
+  /// Returns the first index whose position is at least value.
+  size_t lowerBound(size_t begin, uint64_t value) const;
+
+  /// Returns true when positions form one contiguous range.
+  bool isContiguous() const;
+
+  /// Verifies range bounds and debug-checks strict ordering.
+  void validateRange(uint64_t begin, uint64_t end) const;
+
+ private:
+  // Retains explicit immutable U64 positions when rows are filtered.
+  BufferPtr values_;
+
+  // Stores the first position when rows form one contiguous range.
+  uint64_t firstRow_{0};
+
+  // Stores the number of U64 positions in the buffer.
+  size_t size_;
+};
+
 /// Returns true when the semantic visitor can load this Velox type natively.
 bool supportsNativeVortexType(const TypePtr& type);
 
-/// Copies a non-null U64 Vortex array into absolute row indexes.
-std::vector<uint64_t> readVortexRowIndices(
+/// Retains a non-null U64 Vortex array as absolute row positions.
+VortexRowPositions readVortexRowIndices(
     const vx_session* session,
-    const VortexArray& array);
+    const VortexArray& array,
+    memory::MemoryPool& pool);
 
 /// Imports selected source rows into a compact Velox vector.
 VectorPtr importVortexVector(
